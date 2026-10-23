@@ -51,7 +51,6 @@ internal sealed class ModManagerView : UserControl
     private Pill _pillUpdates = null!;
     private Pill _pillBroken = null!;
     private Pill _pillDisabled = null!;
-    private LogPanel _logPanel = null!;
 
     /// <summary>鼠标按下时落在某个勾选框上，抬起时同一格才认为是「点勾选框」。</summary>
     private int _pendingCheckIndex = -1;
@@ -101,7 +100,6 @@ internal sealed class ModManagerView : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // 1: 操作按钮
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 2: 列表
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));   // 3: 统计
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));   // 4: 日志
 
         // ---- 0: 搜索框（带放大镜）+ 刷新 + 显示已禁用 ----
         var filterRow = new FlowLayoutPanel
@@ -117,26 +115,14 @@ internal sealed class ModManagerView : UserControl
         {
             Width = 340,
             Height = 36,
-            Margin = new Padding(0, 0, 10, 0),
+            Margin = new Padding(0, 0, 14, 0),
             LeadingGlyph = "\uE721",
             LeadingGlyphSize = 10,
         };
         _filterField.Box.TextChanged += (_, _) => RefreshList();
         filterRow.Controls.Add(_filterField);
 
-        _btnRescan = new ModernButton
-        {
-            Glyph = "\uE72C",
-            GlyphSize = 11,
-            Text = "",
-            Variant = ButtonVariant.Secondary,
-            AutoSize = false,
-            Size = new Size(38, 36),
-            Margin = new Padding(0, 0, 14, 0),
-        };
-        _btnRescan.Click += async (_, _) => await RescanAsync();
-        filterRow.Controls.Add(_btnRescan);
-
+        // 刷新按钮移到「Mod 列表」标题栏最右侧（见下方 listCard 的 header）
         _showDisabled = new ModernCheckBox
         {
             Text = "显示已禁用",
@@ -229,6 +215,38 @@ internal sealed class ModManagerView : UserControl
         _list.HandleCreated += (_, _) => StretchLastColumn();
         BuildContextMenu();
 
+        // ---- 列表标题栏：「Mod 列表」标题 + 最右侧的刷新按钮 ----
+        var listHeader = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            BackColor = Theme.Surface,
+        };
+        listHeader.Controls.Add(new Label
+        {
+            Text = "Mod 列表",
+            AutoSize = true,
+            Font = Theme.Ui(9f, FontStyle.Bold),
+            ForeColor = Theme.Text,
+            Location = new Point(16, 11),
+            BackColor = Color.Transparent,
+        });
+        _btnRescan = new ModernButton
+        {
+            Glyph = "\uE72C",          // 刷新
+            GlyphSize = 11,
+            Text = "",
+            Variant = ButtonVariant.Ghost,
+            AutoSize = false,
+            Size = new Size(30, 26),
+            Margin = new Padding(0),
+        };
+        _btnRescan.Click += async (_, _) => await RescanAsync();
+        _btnRescan.Location = new Point(0, 7);   // 下面按宽度贴右
+        listHeader.Controls.Add(_btnRescan);
+        listHeader.Resize += (_, _) =>
+            _btnRescan.Location = new Point(listHeader.Width - _btnRescan.Width - 12, 7);
+
         // 空状态提示叠在列表上面（列表没内容时它才显示）
         _emptyHint = new EmptyHint
         {
@@ -237,8 +255,9 @@ internal sealed class ModManagerView : UserControl
             BackColor = Theme.Surface,   // 显式底色，避免透明背景在 CardPanel 上画不出来
         };
 
-        listCard.Controls.Add(_emptyHint);
         listCard.Controls.Add(_list);
+        listCard.Controls.Add(_emptyHint);
+        listCard.Controls.Add(listHeader);
         root.Controls.Add(listCard, 0, 2);
 
         // ---- 3: 统计（左下角三个数量 + 异常/已禁用） ----
@@ -264,10 +283,6 @@ internal sealed class ModManagerView : UserControl
         _pillDisabled = new Pill("已禁用 0", Theme.TextMuted) { Margin = new Padding(0, 2, 6, 0) };
         summaryRow.Controls.AddRange([_summary, _pillOn, _pillUpdates, _pillBroken, _pillDisabled]);
         root.Controls.Add(summaryRow, 0, 3);
-
-        // ---- 4: 日志 ----
-        _logPanel = new LogPanel("操作日志", headerHeight: 34) { Dock = DockStyle.Fill };
-        root.Controls.Add(_logPanel, 0, 4);
 
         Controls.Add(root);
     }
@@ -1275,10 +1290,10 @@ internal sealed class ModManagerView : UserControl
     }
 
     /*********
-    ** 日志（和主窗口同款配色）
+    ** 日志
     *********/
-    private void Log(string message)
-    {
-        _logPanel.Write(message);
-    }
+    /// <summary>操作日志事件：主窗口把它显示在折叠条上，界面里不再常驻日志面板。</summary>
+    public event Action<string>? Logged;
+
+    private void Log(string message) => Logged?.Invoke(message);
 }

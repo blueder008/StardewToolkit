@@ -28,9 +28,6 @@ internal sealed class MainForm : Form
     private ModernButton _btnExpandSmapi = null!;
     private Panel _modHost = null!;
     private ModManagerView? _modView;
-    private Label _statusMods = null!;
-    private Label _statusEnabled = null!;
-    private Label _statusUpdates = null!;
     private ModernButton _btnDownloads = null!;
 
     private StatusList _statusList = null!;
@@ -335,27 +332,10 @@ internal sealed class MainForm : Form
         return _modHost;
     }
 
-    /// <summary>状态栏：左边模组统计，右边下载入口。</summary>
+    /// <summary>状态栏：统计已由 Mod 管理区内的统计行承担，这里只放右侧的下载入口。</summary>
     private Control BuildStatusBar()
     {
         var bar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.BgSoft };
-
-        var left = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Left,
-            AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            BackColor = Theme.BgSoft,
-            Padding = new Padding(18, 5, 0, 0),
-        };
-        _statusMods = StatusLabel("模组 —", Theme.TextMuted, new Padding(0, 0, 16, 0));
-        _statusEnabled = StatusLabel("已启用 —", Theme.Accent, new Padding(0, 0, 16, 0));
-        _statusUpdates = StatusLabel("可更新 —", Theme.Warn, new Padding(0, 0, 0, 0));
-        left.Controls.Add(_statusMods);
-        left.Controls.Add(_statusEnabled);
-        left.Controls.Add(_statusUpdates);
-        bar.Controls.Add(left);
 
         var right = new FlowLayoutPanel
         {
@@ -383,16 +363,6 @@ internal sealed class MainForm : Form
 
         return bar;
     }
-
-    private static Label StatusLabel(string text, Color tone, Padding margin) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        Font = Theme.Ui(8.5f),
-        ForeColor = tone,
-        BackColor = Color.Transparent,
-        Margin = margin,
-    };
 
     /*********
     ** 启动
@@ -500,27 +470,23 @@ internal sealed class MainForm : Form
         _btnInstall.Text = MainButtonText();
     }
 
+    /// <summary>
+    /// 主按钮文案，只保留两种形态：
+    ///   - 没装过（含 SMAPI 文件残缺）→ 安装 SMAPI
+    ///   - 已装过（无论是有新版可更新，还是已是最新重装）→ 更新 SMAPI
+    /// </summary>
     private string MainButtonText()
     {
         var target = SelectedTarget;
         if (target is null)
-            return "一键安装 SMAPI";
+            return "安装 SMAPI";
 
-        if (GameInspector.IsSmapiBroken(target))
-            return "修复 SMAPI（覆盖安装）";
+        // 没装、或文件残缺 → 都是「装」这一个动作
+        if (!GameInspector.HasSmapiFiles(target) || GameInspector.IsSmapiBroken(target))
+            return "安装 SMAPI";
 
-        var installed = GameInspector.GetSmapiVersion(target);
-        if (installed is null)
-            return _latestRelease is null ? "一键安装 SMAPI" : $"安装 SMAPI {_latestRelease.TagName}";
-
-        if (_latestRelease is not null
-            && Version.TryParse(_latestRelease.TagName, out var latest)
-            && latest > installed)
-        {
-            return $"更新 SMAPI 到 {_latestRelease.TagName}";
-        }
-
-        return "重装 SMAPI";
+        // 已装 → 统一显示「更新 SMAPI」（官方安装器幂等，重装即更新）
+        return "更新 SMAPI";
     }
 
     private void RefreshStatus()
@@ -1122,24 +1088,7 @@ internal sealed class MainForm : Form
 
         _modView = new ModManagerView(target) { Dock = DockStyle.Fill };
         _modHost.Controls.Add(_modView);
-        _modView.StatsChanged += OnModStatsChanged;
-
-        // 视图可能已经自己扫过一轮，用当前统计把状态栏先初始化掉
-        var stats = _modView.Stats;
-        OnModStatsChanged(stats.Total, stats.Enabled, stats.Updates);
-    }
-
-    /// <summary>Mod 数量变化时刷新底部状态栏。</summary>
-    private void OnModStatsChanged(int total, int enabled, int updates)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(() => OnModStatsChanged(total, enabled, updates));
-            return;
-        }
-        _statusMods.Text = $"{total} 个模组";
-        _statusEnabled.Text = $"已启用 {enabled}";
-        _statusUpdates.Text = $"可更新 {updates}";
+        _modView.Logged += Log;
     }
 
     /// <summary>打开下载队列窗口。</summary>

@@ -455,8 +455,10 @@ internal sealed class ModernCheckBox : CheckBox
 
     public override Size GetPreferredSize(Size proposedSize)
     {
+        // 勾选框占 1..17，文字从 24 起，右侧再留 6px 余量。
+        // 按控件实际字体测量，避免高 DPI 下文字被挤掉。
         var text = TextRenderer.MeasureText(Text, Font);
-        return new Size(26 + text.Width + 2, Math.Max(24, text.Height + 8));
+        return new Size(24 + text.Width + 6, Math.Max(24, text.Height + 8));
     }
 
     protected override void OnPaint(PaintEventArgs e)
