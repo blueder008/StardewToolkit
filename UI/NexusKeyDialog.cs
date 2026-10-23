@@ -18,6 +18,12 @@ public sealed class NexusKeyDialog : Form
     private string? _validatedName;
     private bool _validatedPremium;
 
+    /// <summary>用户确认保存的 API key（取消时为 null）。</summary>
+    public string? ApiKey { get; private set; }
+
+    /// <summary>验证通过时记下的用户名。</summary>
+    public string? UserName { get; private set; }
+
     public NexusKeyDialog()
     {
         Theme.StyleForm(this);
@@ -415,6 +421,10 @@ public sealed class NexusKeyDialog : Form
             _status.ForeColor = Theme.Danger;
             return;
         }
+
+        // 暴露给调用方（设置窗口），由调用方决定怎么合并到自己的 AppConfig 实例
+        ApiKey = key;
+        UserName = _validatedName;
 
         var config = AppConfig.Load();
         config.NexusApiKey = key;

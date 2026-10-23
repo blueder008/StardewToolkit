@@ -56,6 +56,18 @@ internal sealed class ModManagerView : UserControl
     /// <summary>鼠标按下时落在某个勾选框上，抬起时同一格才认为是「点勾选框」。</summary>
     private int _pendingCheckIndex = -1;
 
+    /// <summary>列表为空时显示的提示。</summary>
+    private EmptyHint _emptyHint = null!;
+
+    /// <summary>宿主用：当前管理哪个游戏目录。</summary>
+    public string GamePath => _gamePath;
+
+    /// <summary>最近一次扫描的统计（总数 / 已启用 / 可更新），供宿主初始化状态栏。</summary>
+    public (int Total, int Enabled, int Updates) Stats { get; private set; }
+
+    /// <summary>扫描/统计变化时通知宿主刷新状态栏（总数、已启用、可更新）。</summary>
+    public event Action<int, int, int>? StatsChanged;
+
     public ModManagerView(string gamePath, string? focusMod = null)
     {
         _gamePath = gamePath;
@@ -88,8 +100,8 @@ internal sealed class ModManagerView : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // 0: 搜索 / 刷新 / 显示已禁用
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // 1: 操作按钮
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 2: 列表
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));   // 3: 统计
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));  // 4: 日志
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));   // 3: 统计
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));   // 4: 日志
 
         // ---- 0: 搜索框（带放大镜）+ 刷新 + 显示已禁用 ----
         var filterRow = new FlowLayoutPanel
@@ -200,14 +212,14 @@ internal sealed class ModManagerView : UserControl
         };
         _list.Columns.AddRange(
         [
-            new ColumnHeader { Text = "  Mod 名称", Width = 226 },
-            new ColumnHeader { Text = "已装版本", Width = 82 },
-            new ColumnHeader { Text = "最新版本", Width = 82 },
-            new ColumnHeader { Text = "状态", Width = 196 },
-            new ColumnHeader { Text = "作者", Width = 118 },
-            new ColumnHeader { Text = "MOD ID", Width = 170 },
-            new ColumnHeader { Text = "位置", Width = 130 },
-            new ColumnHeader { Text = "备注", Width = 140 },
+            new ColumnHeader { Text = "  Mod 名称", Width = 210 },
+            new ColumnHeader { Text = "已装版本", Width = 100 },
+            new ColumnHeader { Text = "最新版本", Width = 100 },
+            new ColumnHeader { Text = "状态", Width = 190 },
+            new ColumnHeader { Text = "作者", Width = 108 },
+            new ColumnHeader { Text = "MOD ID", Width = 160 },
+            new ColumnHeader { Text = "位置", Width = 120 },
+            new ColumnHeader { Text = "备注", Width = 120 },
         ]);
         _list.DoubleClick += (_, _) => OpenSelectedFolder();
         _list.SelectedIndexChanged += (_, _) => SyncActionButtons();
@@ -216,6 +228,16 @@ internal sealed class ModManagerView : UserControl
         _list.Resize += (_, _) => StretchLastColumn();
         _list.HandleCreated += (_, _) => StretchLastColumn();
         BuildContextMenu();
+
+        // 空状态提示叠在列表上面（列表没内容时它才显示）
+        _emptyHint = new EmptyHint
+        {
+            Dock = DockStyle.Fill,
+            Visible = false,
+            BackColor = Theme.Surface,   // 显式底色，避免透明背景在 CardPanel 上画不出来
+        };
+
+        listCard.Controls.Add(_emptyHint);
         listCard.Controls.Add(_list);
         root.Controls.Add(listCard, 0, 2);
 
@@ -331,6 +353,8 @@ internal sealed class ModManagerView : UserControl
             Log($"⚠ 目录不存在：{ModsDir}");
             Log("SMAPI 还没装的话先回主窗口装一次 SMAPI，装完后这里才有 Mods 目录。");
             _summary.Text = "没有可用的 Mods 目录";
+            _mods.Clear();
+            RefreshList();      // 让空状态提示和统计归零
             return;
         }
 
@@ -950,8 +974,34 @@ internal sealed class ModManagerView : UserControl
             _list.EndUpdate();
         }
 
+        UpdateEmptyHint();
         SyncActionButtons();
         RefreshSummary();
+    }
+
+    /// <summary>列表为空时在卡片中央给一句说明，而不是留一片黑。</summary>
+    private void UpdateEmptyHint()
+    {
+        if (_emptyHint is null)
+            return;
+
+        bool empty = _list.Items.Count == 0;
+
+        // 列表和提示框是重叠的：空状态时把列表让开，避免它盖住提示文字。
+        _list.Visible = !empty;
+        _emptyHint.Visible = empty;
+
+        if (!empty)
+            return;
+
+        _emptyHint.Hint =
+            !Directory.Exists(ModsDir)
+                ? $"还没有 Mods 目录。\n\n先装好 SMAPI，再安装任意 Mod 后这里就会出现。\n\n{ModsDir}"
+                : _mods.Count == 0
+                    ? "这个 Mods 目录里没有找到任何 mod。\n\n用「安装 zip…」导入，或把 mod 文件夹放进 Mods 目录后点右上角刷新。"
+                    : "没有符合当前筛选条件的 mod。\n\n试试清空搜索框，或勾上「显示已禁用」。";
+
+        _emptyHint.Invalidate();
     }
 
     private static bool MatchesFilter(ModEntry mod, string filter) =>
@@ -1049,6 +1099,10 @@ internal sealed class ModManagerView : UserControl
         _pillDisabled.Text = $"已禁用 {disabled}";
         _pillUpdates.PillColor = updates > 0 ? Theme.Accent : Theme.TextMuted;
         _pillBroken.PillColor = problems > 0 ? Theme.Danger : Theme.TextMuted;
+
+        // 通知宿主刷新底部状态栏
+        Stats = (total, enabled, updates);
+        StatsChanged?.Invoke(total, enabled, updates);
     }
 
     /*********

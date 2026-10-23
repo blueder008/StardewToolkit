@@ -16,24 +16,28 @@ internal sealed class MainForm : Form
 
     private SmapiRelease? _latestRelease;
     private readonly List<SteamGame> _games = new();
+    private string? _currentTarget;
     private bool _busy;
 
     /*********
     ** 控件
     *********/
-    private ListBox _gameSelector = null!;
+    private TableLayoutPanel _rootLayout = null!;
+    private Label _smapiSummary = null!;
+    private CardPanel _smapiBody = null!;
+    private ModernButton _btnExpandSmapi = null!;
+    private Panel _modHost = null!;
+    private ModManagerView? _modView;
+    private Label _statusMods = null!;
+    private Label _statusEnabled = null!;
+    private Label _statusUpdates = null!;
+    private ModernButton _btnDownloads = null!;
+
     private StatusList _statusList = null!;
-    private Label _statusPath = null!;
-    private CardPanel _statusCard = null!;
     private ModernButton _btnInstall = null!;
     private ModernButton _btnManual = null!;
     private ModernButton _btnUninstall = null!;
-    private ModernButton _btnReload = null!;
-    private ModernButton _btnMods = null!;
     private ModernButton _btnLogs = null!;
-    private ModernButton _btnBackups = null!;
-    private ModernButton _btnOpenGame = null!;
-    private LogPanel _logPanel = null!;
     private Pill _netPill = null!;
     private readonly SemaphoreSlim _zipGate = new(1, 1); // 保证同一时间只有一个下载在写同一个文件
 
@@ -47,8 +51,9 @@ internal sealed class MainForm : Form
         _pendingNxm = pendingNxm;
         Theme.StyleForm(this);
         Text = "星露谷工具箱 · SMAPI 与 Mod 管理";
-        MinimumSize = new Size(940, 660);
-        Size = new Size(1040, 780);
+        // 与预览稿一致的窗口尺寸：客户区 1262×753，够放 8 列表格
+        MinimumSize = new Size(1040, 680);
+        Size = new Size(1280, 800);
         StartPosition = FormStartPosition.CenterScreen;
 
         BuildUi();
@@ -88,394 +93,209 @@ internal sealed class MainForm : Form
     *********/
     private void BuildUi()
     {
-        var hero = BuildHero();
-
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             BackColor = Theme.Bg,
-            Padding = new Padding(18, 16, 18, 12),
+            Padding = new Padding(0),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));  // 0: 目标游戏
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));   // 1: 间距
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 178));  // 2: 状态 / 快捷入口
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // 3: 间距
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // 4: 主操作
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // 5: 间距
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 6: 日志
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));   // 7: 页脚
+        // 0 顶栏 / 1 SMAPI 折叠条 / 2 SMAPI 展开体 / 3 Mod 管理区 / 4 状态栏
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
 
-        root.Controls.Add(BuildTargetCard(), 0, 0);
-        root.Controls.Add(BuildInfoRow(), 0, 2);
-        root.Controls.Add(BuildActionRow(), 0, 4);
-
-        _logPanel = new LogPanel("运行日志") { Dock = DockStyle.Fill };
-        root.Controls.Add(_logPanel, 0, 6);
-
-        root.Controls.Add(new Label
-        {
-            Text = "提示：Steam 玩家装完需要把启动项填进 Steam 属性，安装成功后会弹窗给你可直接复制的字符串。",
-            AutoSize = true,
-            ForeColor = Theme.TextDim,
-            Font = Theme.Ui(8.5f),
-            Margin = new Padding(2, 8, 0, 0),
-        }, 0, 7);
+        _rootLayout = root;
+        root.Controls.Add(BuildTopBar(), 0, 0);
+        root.Controls.Add(BuildSmapiStrip(), 0, 1);
+        root.Controls.Add(BuildSmapiBody(), 0, 2);
+        root.Controls.Add(BuildModArea(), 0, 3);
+        root.Controls.Add(BuildStatusBar(), 0, 4);
 
         Controls.Add(root);
-        Controls.Add(hero);
     }
 
-    private HeroPanel BuildHero()
+    /// <summary>顶栏：设置 / 日志 …… Nexus 连接状态。</summary>
+    private Control BuildTopBar()
     {
-        var hero = new HeroPanel { Dock = DockStyle.Top, Height = 96 };
+        var bar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.BgSoft };
 
-        hero.Controls.Add(new LogoBadge
+        var left = new FlowLayoutPanel
         {
-            Location = new Point(20, 21),
-            Size = new Size(54, 54),
-        });
-        hero.Controls.Add(new Label
-        {
-            Text = "星露谷工具箱",
-            Font = Theme.Ui(17f, FontStyle.Bold),
-            ForeColor = Theme.Text,
-            BackColor = Color.Transparent,
+            Dock = DockStyle.Left,
             AutoSize = true,
-            Location = new Point(90, 17),
-        });
-        hero.Controls.Add(new Label
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = Theme.BgSoft,
+            Padding = new Padding(12, 4, 0, 0),
+        };
+        var btnSettings = new ModernButton
         {
-            Text = "SMAPI 安装 · Mod 管理 · 冲突诊断 · 日志分析",
+            Text = "设置",
+            Glyph = "\uE713",
+            GlyphSize = 10,
+            Variant = ButtonVariant.Ghost,
+            AutoSize = true,
+            Height = 32,
             Font = Theme.Ui(9f),
-            ForeColor = Theme.TextMuted,
-            BackColor = Color.Transparent,
-            AutoSize = true,
-            Location = new Point(92, 50),
-        });
+            Margin = new Padding(0, 0, 4, 0),
+        };
+        btnSettings.Click += (_, _) => OpenSettings();
 
-        _netPill = new Pill("正在检查网络", Theme.TextMuted);
-        var version = typeof(MainForm).Assembly.GetName().Version;
-        var versionPill = new Pill($"v{version?.ToString(3) ?? "0.9.0"}", Theme.Purple);
+        _btnLogs = new ModernButton
+        {
+            Text = "日志",
+            Glyph = "\uE9D9",
+            GlyphSize = 10,
+            Variant = ButtonVariant.Ghost,
+            AutoSize = true,
+            Height = 32,
+            Font = Theme.Ui(9f),
+            Margin = new Padding(0),
+        };
+        _btnLogs.Click += (_, _) => new LogViewerForm().Show(this);
+
+        left.Controls.Add(btnSettings);
+        left.Controls.Add(_btnLogs);
+        bar.Controls.Add(left);
 
         var right = new FlowLayoutPanel
         {
             Dock = DockStyle.Right,
-            Width = 330,
+            AutoSize = true,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
-            BackColor = Color.Transparent,
-            Padding = new Padding(0, 36, 20, 0),
+            BackColor = Theme.BgSoft,
+            Padding = new Padding(0, 8, 14, 0),
         };
+        _netPill = new Pill("正在检查网络", Theme.TextMuted);
         right.Controls.Add(_netPill);
-        right.Controls.Add(versionPill);
-        hero.Controls.Add(right);
+        bar.Controls.Add(right);
 
-        return hero;
+        return bar;
     }
 
-    private Control BuildTargetCard()
+    /// <summary>SMAPI 折叠条：一行说清状态，右侧按钮展开完整区域。</summary>
+    private Control BuildSmapiStrip()
     {
         var card = new CardPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(16, 10, 16, 12),
+            CornerRadius = 10,
+            Margin = new Padding(16, 8, 16, 4),
+            Padding = new Padding(0),
         };
 
         var inner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = Theme.Surface,
-        };
-        inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        inner.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var header = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            ColumnCount = 2,
+            ColumnCount = 3,
             BackColor = Theme.Surface,
             Margin = new Padding(0),
         };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        header.Controls.Add(new Label
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52));
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        inner.Controls.Add(new LogoBadge
         {
-            Text = "目标游戏",
-            Font = Theme.Ui(10.5f, FontStyle.Bold),
-            ForeColor = Theme.Text,
-            AutoSize = true,
-            Margin = new Padding(0, 3, 0, 6),
+            Letter = "S",
+            Size = new Size(26, 26),
+            CornerRadius = 8,
+            Margin = new Padding(14, 7, 0, 0),
         }, 0, 0);
 
-        var headerButtons = new FlowLayoutPanel
+        _smapiSummary = new Label
         {
+            Text = "正在检测 SMAPI…",
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.Ui(9.5f),
+            ForeColor = Theme.Text,
+            BackColor = Color.Transparent,
+            Margin = new Padding(10, 0, 0, 0),
+        };
+        inner.Controls.Add(_smapiSummary, 1, 0);
+
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
             AutoSize = true,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
             BackColor = Theme.Surface,
-            Anchor = AnchorStyles.Right,
+            Padding = new Padding(0, 8, 12, 0),
             Margin = new Padding(0),
         };
-        var btnManualPick = new ModernButton
+        _btnExpandSmapi = new ModernButton
         {
-            Text = "手动选择目录…",
+            Text = "展开",
             Variant = ButtonVariant.Ghost,
             AutoSize = true,
-            Height = 26,
+            Height = 28,
             Font = Theme.Ui(8.5f),
+            Margin = new Padding(0),
         };
-        btnManualPick.Click += (_, _) => PickManually();
-        var btnDetect = new ModernButton
-        {
-            Text = "重新检测",
-            Variant = ButtonVariant.Ghost,
-            AutoSize = true,
-            Height = 26,
-            Font = Theme.Ui(8.5f),
-            Margin = new Padding(0, 0, 6, 0),
-        };
-        btnDetect.Click += (_, _) => DetectGames();
-        headerButtons.Controls.Add(btnManualPick);
-        headerButtons.Controls.Add(btnDetect);
-        header.Controls.Add(headerButtons, 1, 0);
-        inner.Controls.Add(header, 0, 0);
-
-        var host = new Panel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = Theme.Surface,
-            Padding = new Padding(0, 2, 0, 0),
-        };
-        _gameSelector = new ListBox
-        {
-            Dock = DockStyle.Fill,
-            BackColor = Theme.SurfaceRaised,
-            ForeColor = Theme.Text,
-            BorderStyle = BorderStyle.None,
-            IntegralHeight = false,
-            DrawMode = DrawMode.OwnerDrawFixed,
-            ItemHeight = 46,
-            Font = Theme.Ui(9f),
-        };
-        _gameSelector.DrawItem += DrawGameItem;
-        _gameSelector.SelectedIndexChanged += (_, _) => RefreshUi();
-        host.Controls.Add(_gameSelector);
-        inner.Controls.Add(host, 0, 1);
+        _btnExpandSmapi.Click += (_, _) => ToggleSmapiPanel();
+        actions.Controls.Add(_btnExpandSmapi);
+        inner.Controls.Add(actions, 2, 0);
 
         card.Controls.Add(inner);
         return card;
     }
 
-    /// <summary>候选目录自绘：路径 + 来源库 + SMAPI 状态徽标。</summary>
-    private void DrawGameItem(object? sender, DrawItemEventArgs e)
+    /// <summary>SMAPI 展开体：游戏目录 + 版本状态 + 安装/卸载按钮。</summary>
+    private Control BuildSmapiBody()
     {
-        if (e.Index < 0 || e.Index >= _games.Count)
-            return;
-
-        var g = e.Graphics;
-        var game = _games[e.Index];
-        bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-        var rect = e.Bounds;
-
-        Color background = selected
-            ? Theme.Blend(Theme.SurfaceRaised, Theme.Accent, 0.16)
-            : e.Index % 2 == 1 ? Color.FromArgb(29, 38, 50) : Theme.SurfaceRaised;
-        using (var brush = new SolidBrush(background))
-            g.FillRectangle(brush, rect);
-
-        if (selected)
-        {
-            using var accent = new SolidBrush(Theme.Accent);
-            g.FillRectangle(accent, rect.Left, rect.Top + 7, 3, rect.Height - 14);
-        }
-        else
-        {
-            using var line = new Pen(Color.FromArgb(20, 255, 255, 255));
-            g.DrawLine(line, rect.Left + 12, rect.Bottom - 1, rect.Right - 12, rect.Bottom - 1);
-        }
-
-        bool hasSmapi = GameInspector.HasSmapiFiles(game.GamePath);
-        int left = rect.Left + 14;
-        int badgeWidth = 76;
-
-        var textRect = new Rectangle(left, rect.Top + 6, Math.Max(40, rect.Right - left - badgeWidth - 22), 20);
-        TextRenderer.DrawText(g, game.GamePath, Theme.Ui(9.5f, FontStyle.Bold), textRect,
-            Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-
-        var subRect = new Rectangle(left, rect.Top + 25, Math.Max(40, rect.Right - left - 16), 18);
-        TextRenderer.DrawText(g, $"Steam 库 · {game.LibraryPath}", Theme.Ui(8f), subRect,
-            Theme.TextDim, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-
-        var tone = hasSmapi ? Theme.Success : Theme.TextMuted;
-        var badge = new Rectangle(rect.Right - badgeWidth - 14, rect.Top + (rect.Height - 22) / 2, badgeWidth, 22);
-        Theme.FillRounded(g, badge, 11, Theme.Blend(Theme.SurfaceRaised, tone, 0.16));
-        TextRenderer.DrawText(g, hasSmapi ? "SMAPI 已装" : "未装 SMAPI", Theme.Ui(7.5f), badge, tone,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-    }
-
-    private Control BuildInfoRow()
-    {
-        var row = new TableLayoutPanel
+        var card = new CardPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = Theme.Bg,
+            CornerRadius = 10,
+            Margin = new Padding(16, 0, 16, 6),
+            Padding = new Padding(18, 12, 18, 12),
+            Visible = false,
         };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
-        row.Controls.Add(BuildStatusCard(), 0, 0);
-        row.Controls.Add(BuildQuickCard(), 1, 0);
-        return row;
-    }
-
-    private Control BuildStatusCard()
-    {
-        _statusCard = new CardPanel
-        {
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 12, 0),
-            Padding = new Padding(16, 12, 16, 10),
-        };
+        _smapiBody = card;
 
         var inner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
+            ColumnCount = 2,
             BackColor = Theme.Surface,
+            Margin = new Padding(0),
         };
-        inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        inner.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        inner.Controls.Add(new Label
-        {
-            Text = "安装状态",
-            Font = Theme.Ui(10.5f, FontStyle.Bold),
-            ForeColor = Theme.Text,
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 2),
-        }, 0, 0);
-
-        _statusPath = new Label
-        {
-            Text = "尚未选择游戏目录",
-            AutoSize = false,
-            Dock = DockStyle.Top,
-            Height = 20,
-            Font = Theme.Mono(8f),
-            ForeColor = Theme.TextDim,
-            AutoEllipsis = true,
-            Margin = new Padding(0, 0, 0, 4),
-            BackColor = Color.Transparent,
-        };
-        inner.Controls.Add(_statusPath, 0, 1);
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 172));
 
         _statusList = new StatusList
         {
             Dock = DockStyle.Fill,
-            RowHeight = 27,
-            LabelWidth = 78,
+            RowHeight = 28,
+            LabelWidth = 84,
             Margin = new Padding(0),
         };
-        inner.Controls.Add(_statusList, 0, 2);
+        inner.Controls.Add(_statusList, 0, 0);
 
-        _statusCard.Controls.Add(inner);
-        return _statusCard;
-    }
-
-    private Control BuildQuickCard()
-    {
-        var card = new CardPanel
+        var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(16, 12, 16, 14),
-        };
-
-        var inner = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = Theme.Surface,
-        };
-        inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        inner.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        inner.Controls.Add(new Label
-        {
-            Text = "快捷入口",
-            Font = Theme.Ui(10.5f, FontStyle.Bold),
-            ForeColor = Theme.Text,
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 8),
-        }, 0, 0);
-
-        var grid = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 2,
-            BackColor = Theme.Surface,
-            Margin = new Padding(0),
-        };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-
-        _btnMods = MakeQuickButton("Mod 管理", ButtonVariant.Primary, new Padding(0, 0, 6, 6));
-        _btnMods.Click += (_, _) => OpenModManager();
-        _btnLogs = MakeQuickButton("日志查看", ButtonVariant.Secondary, new Padding(6, 0, 0, 6));
-        _btnLogs.Click += (_, _) => new LogViewerForm().Show(this);
-        _btnBackups = MakeQuickButton("备份管理", ButtonVariant.Secondary, new Padding(0, 6, 6, 0));
-        _btnBackups.Click += (_, _) => OpenBackupManager();
-        _btnOpenGame = MakeQuickButton("打开游戏目录", ButtonVariant.Secondary, new Padding(6, 6, 0, 0));
-        _btnOpenGame.Click += (_, _) => OpenGameFolder();
-
-        grid.Controls.Add(_btnMods, 0, 0);
-        grid.Controls.Add(_btnLogs, 1, 0);
-        grid.Controls.Add(_btnBackups, 0, 1);
-        grid.Controls.Add(_btnOpenGame, 1, 1);
-        inner.Controls.Add(grid, 0, 1);
-
-        card.Controls.Add(inner);
-        return card;
-    }
-
-    private static ModernButton MakeQuickButton(string text, ButtonVariant variant, Padding margin) => new()
-    {
-        Text = text,
-        Variant = variant,
-        Dock = DockStyle.Fill,
-        Margin = margin,
-        Font = Theme.Ui(9f),
-    };
-
-    private Control BuildActionRow()
-    {
-        var row = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = Theme.Bg,
+            FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
-            Padding = new Padding(0, 0, 0, 0),
+            BackColor = Theme.Surface,
+            Padding = new Padding(8, 0, 0, 0),
+            Margin = new Padding(0),
         };
-
         _btnInstall = new ModernButton
         {
-            Text = "一键安装 SMAPI",
+            Text = "安装 SMAPI",
             Variant = ButtonVariant.Primary,
-            AutoSize = true,
-            MinimumSize = new Size(230, 44),
-            CornerRadius = 10,
-            Font = Theme.Ui(10.5f, FontStyle.Bold),
-            Margin = new Padding(0, 0, 10, 0),
+            AutoSize = false,
+            Size = new Size(152, 34),
+            Font = Theme.Ui(9.5f, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 6),
         };
         _btnInstall.Click += async (_, _) => await ActionAsync(uninstall: false);
 
@@ -483,48 +303,112 @@ internal sealed class MainForm : Form
         {
             Text = "卸载 SMAPI",
             Variant = ButtonVariant.Danger,
-            AutoSize = true,
-            MinimumSize = new Size(112, 44),
-            Margin = new Padding(0, 0, 10, 0),
+            AutoSize = false,
+            Size = new Size(152, 34),
+            Margin = new Padding(0, 0, 0, 6),
         };
         _btnUninstall.Click += async (_, _) => await ActionAsync(uninstall: true);
-
-        _btnReload = new ModernButton
-        {
-            Text = "检查更新",
-            Variant = ButtonVariant.Secondary,
-            AutoSize = true,
-            MinimumSize = new Size(108, 44),
-            Margin = new Padding(0, 0, 10, 0),
-        };
-        _btnReload.Click += async (_, _) => await ReloadLatestAsync();
 
         _btnManual = new ModernButton
         {
             Text = "手动安装…",
             Variant = ButtonVariant.Ghost,
-            AutoSize = true,
-            MinimumSize = new Size(104, 44),
+            AutoSize = false,
+            Size = new Size(152, 34),
+            Margin = new Padding(0),
         };
         _btnManual.Click += async (_, _) => await ManualInstallClicked();
 
-        row.Controls.AddRange([_btnInstall, _btnUninstall, _btnReload, _btnManual]);
-        return row;
+        buttons.Controls.Add(_btnInstall);
+        buttons.Controls.Add(_btnUninstall);
+        buttons.Controls.Add(_btnManual);
+        inner.Controls.Add(buttons, 1, 0);
+
+        card.Controls.Add(inner);
+        return card;
     }
+
+    /// <summary>主内容：Mod 管理区（用户选定的单窗口骨架）。</summary>
+    private Control BuildModArea()
+    {
+        _modHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
+        return _modHost;
+    }
+
+    /// <summary>状态栏：左边模组统计，右边下载入口。</summary>
+    private Control BuildStatusBar()
+    {
+        var bar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.BgSoft };
+
+        var left = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Left,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = Theme.BgSoft,
+            Padding = new Padding(18, 5, 0, 0),
+        };
+        _statusMods = StatusLabel("模组 —", Theme.TextMuted, new Padding(0, 0, 16, 0));
+        _statusEnabled = StatusLabel("已启用 —", Theme.Accent, new Padding(0, 0, 16, 0));
+        _statusUpdates = StatusLabel("可更新 —", Theme.Warn, new Padding(0, 0, 0, 0));
+        left.Controls.Add(_statusMods);
+        left.Controls.Add(_statusEnabled);
+        left.Controls.Add(_statusUpdates);
+        bar.Controls.Add(left);
+
+        var right = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            AutoSize = true,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            BackColor = Theme.BgSoft,
+            Padding = new Padding(0, 4, 14, 0),
+        };
+        _btnDownloads = new ModernButton
+        {
+            Text = "下载",
+            Glyph = "\uE896",
+            GlyphSize = 10,
+            Variant = ButtonVariant.Ghost,
+            AutoSize = true,
+            Height = 26,
+            Font = Theme.Ui(8.5f),
+            Margin = new Padding(0),
+        };
+        _btnDownloads.Click += (_, _) => ShowDownloadQueue();
+        right.Controls.Add(_btnDownloads);
+        bar.Controls.Add(right);
+
+        return bar;
+    }
+
+    private static Label StatusLabel(string text, Color tone, Padding margin) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        Font = Theme.Ui(8.5f),
+        ForeColor = tone,
+        BackColor = Color.Transparent,
+        Margin = margin,
+    };
 
     /*********
     ** 启动
     *********/
     private async Task StartupAsync()
     {
-        var steamPath = SteamLocator.GetSteamPath();
-        if (steamPath is null)
-            Log("⚠ 没有检测到 Steam（未安装或没登录过）。可以点「重新检测」试试，或用手动选择目录。");
-        else
-            Log($"Steam 路径：{steamPath}");
-
         DetectGames();
         RefreshUi();
+
+        // 首次使用 / 没装 SMAPI：自动展开 SMAPI 区，把安装入口直接摆出来，
+        // 否则用户看到的是一个空列表，不知道该先干什么。
+        var target = SelectedTarget;
+        if (target is not null && !GameInspector.HasSmapiFiles(target))
+            ExpandSmapi(true);
+
+        EnsureModView();
 
         await ReloadLatestAsync();
         RefreshUi();
@@ -553,34 +437,25 @@ internal sealed class MainForm : Form
         RefreshUi();
     }
 
+    /// <summary>
+    /// 从候选里挑当前目标：优先带 SMAPI 的目录，其次上次用过的，最后第一个。
+    /// 新骨架里没有游戏选择列表（位置在设置里改），这里只负责确定「当前目标」。
+    /// </summary>
     private void FillGameSelector()
     {
-        _gameSelector.BeginUpdate();
-        try
+        if (_games.Count == 0)
         {
-            _gameSelector.Items.Clear();
-            foreach (var g in _games)
-                _gameSelector.Items.Add($"{g.GamePath}   [{g.LibraryPath}]");
-
-            if (_games.Count == 0)
-            {
-                _gameSelector.SelectedIndex = -1;
-                return;
-            }
-
-            // 默认优先：带 SMAPI 的目录，其次上次的，最后第一个 Steam 检测结果
-            int select = _games.FindIndex(g => GameInspector.HasSmapiFiles(g.GamePath));
-            if (select < 0 && _config.LastGamePath is not null)
-                select = _games.FindIndex(g => SamePath(g.GamePath, _config.LastGamePath));
-            if (select < 0)
-                select = 0;
-
-            _gameSelector.SelectedIndex = select;
+            _currentTarget = null;
+            return;
         }
-        finally
-        {
-            _gameSelector.EndUpdate();
-        }
+
+        int select = _games.FindIndex(g => GameInspector.HasSmapiFiles(g.GamePath));
+        if (select < 0 && _config.LastGamePath is not null)
+            select = _games.FindIndex(g => SamePath(g.GamePath, _config.LastGamePath));
+        if (select < 0)
+            select = 0;
+
+        _currentTarget = _games[select].GamePath;
     }
 
     private void PickManually()
@@ -608,11 +483,8 @@ internal sealed class MainForm : Form
         DetectGames();
     }
 
-    /// <summary>刷新候选一览和状态栏。</summary>
-    private string? SelectedTarget =>
-        _gameSelector.SelectedIndex >= 0 && _gameSelector.SelectedIndex < _games.Count
-            ? _games[_gameSelector.SelectedIndex].GamePath
-            : null;
+    /// <summary>当前选中的游戏目录（设置里改，主界面只读）。</summary>
+    private string? SelectedTarget => _currentTarget;
 
     /*********
     ** 界面刷新
@@ -625,10 +497,6 @@ internal sealed class MainForm : Form
         _btnInstall.Enabled = !_busy && target is not null && GameInspector.HasGameFiles(target);
         _btnManual.Enabled = !_busy && target is not null && GameInspector.HasGameFiles(target);
         _btnUninstall.Enabled = !_busy && target is not null && GameInspector.HasSmapiFiles(target);
-        _btnReload.Enabled = !_busy;
-        _btnMods.Enabled = !_busy && target is not null;
-        _btnBackups.Enabled = !_busy && target is not null;
-        _btnOpenGame.Enabled = !_busy && target is not null;
         _btnInstall.Text = MainButtonText();
     }
 
@@ -660,19 +528,20 @@ internal sealed class MainForm : Form
         var target = SelectedTarget;
         if (target is null)
         {
-            _statusPath.Text = "尚未选择游戏目录";
+            _smapiSummary.Text = "尚未选择游戏目录 · 请到「设置」里指定";
+            _smapiSummary.ForeColor = Theme.Warn;
             _statusList.SetRows(
             [
                 new StatusList.Row("状态", "等待选择游戏目录", Theme.Warn),
-                new StatusList.Row("提示", "点「重新检测」或「手动选择目录…」", Theme.TextMuted),
+                new StatusList.Row("提示", "点顶部「设置」选择游戏目录", Theme.TextMuted),
                 new StatusList.Row("兼容", "Steam / GOG / 绿色版都可手动指定", Theme.TextMuted),
             ]);
             return;
         }
 
         var source = _games.FirstOrDefault(g => SamePath(g.GamePath, target))?.LibraryPath;
-        _statusPath.Text = source is null ? target : $"{target}   ·   {source}";
         var rows = new List<StatusList.Row>();
+        rows.Add(new StatusList.Row("游戏目录", target, Theme.TextMuted));
 
         var gameVer = GameInspector.GetGameVersion(target);
         var smapiInstalled = GameInspector.HasSmapiFiles(target);
@@ -710,56 +579,75 @@ internal sealed class MainForm : Form
             rows.Add(new StatusList.Row("注意", string.Join("；", warnings), Theme.Danger));
 
         _statusList.SetRows(rows);
+        UpdateSmapiSummary(target);
+    }
+
+    /// <summary>折叠条上那一行摘要：把最关键的信息压成一句话。</summary>
+    private void UpdateSmapiSummary(string? target)
+    {
+        if (_smapiSummary is null)
+            return;
+
+        if (target is null)
+        {
+            _smapiSummary.Text = "尚未选择游戏目录 · 请到「设置」里指定";
+            _smapiSummary.ForeColor = Theme.Warn;
+            return;
+        }
+
+        var installed = GameInspector.HasSmapiFiles(target);
+        var version = GameInspector.GetSmapiVersion(target);
+        var broken = GameInspector.IsSmapiBroken(target);
+
+        if (broken)
+        {
+            _smapiSummary.Text = "SMAPI 文件残缺 · 展开可覆盖修复";
+            _smapiSummary.ForeColor = Theme.Danger;
+            return;
+        }
+
+        if (!installed)
+        {
+            var latest = _latestRelease?.TagName;
+            _smapiSummary.Text = latest is null
+                ? "未安装 SMAPI · 展开可安装"
+                : $"未安装 SMAPI · 最新 {latest}";
+            _smapiSummary.ForeColor = Theme.Warn;
+            return;
+        }
+
+        var current = version?.ToString() ?? "版本未知";
+        if (_latestRelease is not null
+            && Version.TryParse(_latestRelease.TagName, out var latestVer)
+            && version is not null
+            && latestVer > version)
+        {
+            _smapiSummary.Text = $"SMAPI {current} · 可更新到 {_latestRelease.TagName}";
+            _smapiSummary.ForeColor = Theme.Warn;
+        }
+        else
+        {
+            _smapiSummary.Text = $"SMAPI {current} · 已安装 · 已是最新";
+            _smapiSummary.ForeColor = Theme.Text;
+        }
     }
 
     /*********
     ** Mod 管理
     *********/
-    /// <summary>打开 Mod 管理器窗口（模态，关掉回来自动刷新状态）。</summary>
-    private void OpenModManager()
+    /// <summary>Mod 管理已经内嵌在主窗口里；这里保留「重建视图」能力（游戏目录变化后用）。</summary>
+    private void ReloadModView()
     {
-        if (_busy)
-            return;
-
-        var target = SelectedTarget;
-        if (target is null)
+        if (_modView is not null)
         {
-            Msg.Show(this, "请先在上方选择一个游戏目录。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            _modHost.Controls.Remove(_modView);
+            _modView.Dispose();
+            _modView = null;
         }
-
-        using var manager = new ModManagerForm(target);
-        manager.ShowDialog(this);
-        RefreshUi();
+        EnsureModView();
     }
 
-    /// <summary>从主窗口直达备份管理（不需要先开 Mod 管理器）。</summary>
-    private void OpenBackupManager()
-    {
-        if (_busy)
-            return;
-
-        var target = SelectedTarget;
-        if (target is null)
-        {
-            Msg.Show(this, "请先在上方选择一个游戏目录。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        var modsDir = Path.Combine(target, "Mods");
-        if (!Directory.Exists(modsDir))
-        {
-            Msg.Show(this,
-                $"还没有 Mods 目录：{modsDir}\n\n先把 SMAPI 装好，再安装任意 Mod 后就会自动产生备份。",
-                "没有 Mods 目录", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        using var backups = new BackupManagerForm(modsDir);
-        backups.ShowDialog(this);
-        RefreshUi();
-    }
-
+    /// <summary>在资源管理器里打开游戏目录。</summary>
     private void OpenGameFolder()
     {
         var target = SelectedTarget;
@@ -1170,7 +1058,101 @@ internal sealed class MainForm : Form
         }
         if (IsDisposed)
             return;
-        _logPanel.Write(message);
+
+        // 新骨架里主窗口不再常驻日志面板：日志仍完整写进 LogViewerForm 的来源文件，
+        // 这里把最近一条操作反馈显示在折叠条上，够用且不占版面。
+        if (_smapiSummary is not null)
+        {
+            _smapiSummary.Text = message;
+            _smapiSummary.ForeColor = message.StartsWith("❌") || message.StartsWith("🗑")
+                ? Theme.Danger
+                : message.StartsWith("✅")
+                    ? Theme.Success
+                    : message.StartsWith("⚠") || message.StartsWith("🔴")
+                        ? Theme.Warn
+                        : Theme.TextMuted;
+        }
+    }
+
+    /*********
+    ** 新骨架的交互
+    *********/
+    /// <summary>展开 / 收起 SMAPI 区域。</summary>
+    private void ToggleSmapiPanel() => ExpandSmapi(_rootLayout.RowStyles[2].Height <= 0);
+
+    /// <summary>展开或收起 SMAPI 区域。</summary>
+    private void ExpandSmapi(bool expand)
+    {
+        if (_rootLayout is null || _smapiBody is null)
+            return;
+        _rootLayout.RowStyles[2].Height = expand ? 150 : 0;
+        _smapiBody.Visible = expand;
+        _btnExpandSmapi.Text = expand ? "收起" : "展开";
+        _rootLayout.PerformLayout();
+    }
+
+    /// <summary>打开设置窗口；返回后重读配置并刷新。</summary>
+    private void OpenSettings()
+    {
+        using var dialog = new SettingsDialog(_config, _currentTarget, PickManually);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        _config.Save();
+        DetectGames();
+        RefreshUi();
+        EnsureModView();
+    }
+
+    /// <summary>把 Mod 管理区挂到主窗口里（首次进入或游戏目录变化时重建）。</summary>
+    private void EnsureModView()
+    {
+        var target = SelectedTarget;
+        if (target is null || _modHost is null)
+            return;
+
+        if (_modView is not null && SamePath(_modView.GamePath, target))
+            return;
+
+        if (_modView is not null)
+        {
+            _modHost.Controls.Remove(_modView);
+            _modView.Dispose();
+        }
+
+        _modView = new ModManagerView(target) { Dock = DockStyle.Fill };
+        _modHost.Controls.Add(_modView);
+        _modView.StatsChanged += OnModStatsChanged;
+
+        // 视图可能已经自己扫过一轮，用当前统计把状态栏先初始化掉
+        var stats = _modView.Stats;
+        OnModStatsChanged(stats.Total, stats.Enabled, stats.Updates);
+    }
+
+    /// <summary>Mod 数量变化时刷新底部状态栏。</summary>
+    private void OnModStatsChanged(int total, int enabled, int updates)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => OnModStatsChanged(total, enabled, updates));
+            return;
+        }
+        _statusMods.Text = $"{total} 个模组";
+        _statusEnabled.Text = $"已启用 {enabled}";
+        _statusUpdates.Text = $"可更新 {updates}";
+    }
+
+    /// <summary>打开下载队列窗口。</summary>
+    private void ShowDownloadQueue()
+    {
+        _nxmForm ??= new NxmDownloadForm();
+        if (_nxmForm.IsDisposed)
+            _nxmForm = new NxmDownloadForm();
+
+        if (!_nxmForm.Visible)
+            _nxmForm.Show(this);
+        else
+            _nxmForm.Activate();
     }
 
     /*********

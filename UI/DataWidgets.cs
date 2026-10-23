@@ -64,9 +64,12 @@ internal sealed class ThemedListView : ListView
 
             // 注意：HDI_HEIGHT 与 HDI_WIDTH 同为 0x0001，在 HDM_SETITEMW 上下文里
             // cxy 会被解释成「列宽」，所以绝不能用它设置表头高度（那会把第 0 列压扁）。
-            // 表头高度只能靠字体撑：放大表头字体，OnDrawColumnHeader 自己用小字号画文字，
-            // 因而观感不变、行高变大。
-            float points = MathF.Max(9f, HeaderHeight * 0.36f);
+            // 表头高度只能靠字体撑：字号只做小幅提升（最多到 11pt）。
+            // 不能按 HeaderHeight 等比放大 —— 系统会用该字号来测量列标题宽度，
+            // 12pt 以上就会把「已装版本」这类四字表头挤成「已装版…」。
+            float points = HeaderHeight <= 34f
+                ? 9f
+                : MathF.Min(11f, 9f + (HeaderHeight - 34f) * 0.05f);
             _headerFont = new Font(Theme.UiFontName, points, FontStyle.Bold);
             SendMessage(header, WmSetFont, _headerFont.ToHfont(), IntPtr.Zero);
             _headerHeightApplied = true;
