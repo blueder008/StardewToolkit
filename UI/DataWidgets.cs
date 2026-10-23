@@ -12,12 +12,19 @@ internal sealed class ThemedListView : ListView
 {
     private int _hoverIndex = -1;
     private bool _headerHeightApplied;
+    private Font? _headerFont;
 
     /// <summary>第一列前画一个状态圆点（颜色取 Item.ForeColor）。</summary>
     public bool ShowStatusDot { get; set; } = true;
 
     /// <summary>鼠标悬停高亮（超大列表建议关掉，避免频繁重绘）。</summary>
     public bool EnableHover { get; set; } = true;
+
+    /// <summary>
+    /// 第一列自绘勾选框。OwnerDraw 模式下系统复选框不会绘制，所以自己画。
+    /// 打开后第一列文字会自动右移让位。
+    /// </summary>
+    public bool DrawCheckBoxes { get; set; }
 
     public int RowHeight { get; set; } = 30;
     public int HeaderHeight { get; set; } = 34;
@@ -54,8 +61,14 @@ internal sealed class ThemedListView : ListView
             IntPtr header = SendMessage(Handle, LvmGetHeader, IntPtr.Zero, IntPtr.Zero);
             if (header == IntPtr.Zero)
                 return;
-            var item = new HDITEM { mask = HdiHeight, cxy = HeaderHeight };
-            SendMessage(header, HdmSetItemW, IntPtr.Zero, ref item);
+
+            // 注意：HDI_HEIGHT 与 HDI_WIDTH 同为 0x0001，在 HDM_SETITEMW 上下文里
+            // cxy 会被解释成「列宽」，所以绝不能用它设置表头高度（那会把第 0 列压扁）。
+            // 表头高度只能靠字体撑：放大表头字体，OnDrawColumnHeader 自己用小字号画文字，
+            // 因而观感不变、行高变大。
+            float points = MathF.Max(9f, HeaderHeight * 0.36f);
+            _headerFont = new Font(Theme.UiFontName, points, FontStyle.Bold);
+            SendMessage(header, WmSetFont, _headerFont.ToHfont(), IntPtr.Zero);
             _headerHeightApplied = true;
         }
         catch
@@ -156,7 +169,35 @@ internal sealed class ThemedListView : ListView
         if (!Enabled)
             fore = Theme.TextDim;
 
-        if (e.ColumnIndex == 0 && ShowStatusDot && !item.Selected)
+        // 第一列自绘勾选框（OwnerDraw 下系统复选框不显示）
+        if (e.ColumnIndex == 0 && DrawCheckBoxes)
+        {
+            var boxRect = new Rectangle(e.Bounds.Left + 12, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16);
+            if (item.Checked)
+            {
+                Theme.FillRounded(g, boxRect, 4, Theme.Accent);
+                using var tick = new Pen(Theme.AccentText, 2f)
+                {
+                    StartCap = LineCap.Round,
+                    EndCap = LineCap.Round,
+                };
+                g.DrawLines(tick, new[]
+                {
+                    new Point(boxRect.Left + 4, boxRect.Top + 8),
+                    new Point(boxRect.Left + 7, boxRect.Top + 11),
+                    new Point(boxRect.Left + 12, boxRect.Top + 5),
+                });
+            }
+            else
+            {
+                Theme.DrawRounded(g, boxRect, 4, Theme.SurfaceRaised, Theme.BorderStrong);
+            }
+
+            textRect = new Rectangle(e.Bounds.Left + 38, e.Bounds.Top,
+                Math.Max(0, e.Bounds.Width - 42), e.Bounds.Height);
+        }
+
+        if (e.ColumnIndex == 0 && ShowStatusDot && !item.Selected && !DrawCheckBoxes)
         {
             int dotX = e.Bounds.Left + 7;
             int dotY = e.Bounds.Top + e.Bounds.Height / 2 - 3;
@@ -177,31 +218,10 @@ internal sealed class ThemedListView : ListView
     ** P/Invoke（表头加高）
     *********/
     private const int LvmGetHeader = 0x101F;
-    private const int HdmSetItemW = 0x120C;
-    private const uint HdiHeight = 0x0001;
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct HDITEM
-    {
-        public uint mask;
-        public int cxy;
-        public IntPtr pszText;
-        public IntPtr hbm;
-        public int cchTextMax;
-        public int fmt;
-        public IntPtr lParam;
-        public IntPtr iImage;
-        public IntPtr iOrder;
-        public uint type;
-        public IntPtr pvFilter;
-        public uint state;
-    }
+    private const int WmSetFont = 0x0030;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref HDITEM lParam);
 }
 
 /*********

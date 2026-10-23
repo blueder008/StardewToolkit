@@ -15,6 +15,34 @@ public sealed class AppConfig
     /// <summary>上次验证 Nexus API key 时记下的用户名（只用来在界面显示「已连接为 xxx」）。</summary>
     public string? NexusUserName { get; set; }
 
+    /// <summary>
+    /// 用户给 mod 写的备注，key = mod 的 UniqueID，value = 备注内容。
+    /// 以 UniqueID 为键，mod 改名、换文件夹都不会丢。
+    /// </summary>
+    public Dictionary<string, string> ModNotes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>读取某个 mod 的备注（没有返回 null）。</summary>
+    public string? GetNote(string? uniqueId)
+    {
+        if (string.IsNullOrWhiteSpace(uniqueId))
+            return null;
+        return ModNotes.TryGetValue(uniqueId, out var note) && !string.IsNullOrWhiteSpace(note) ? note : null;
+    }
+
+    /// <summary>写入/清除某个 mod 的备注（传空或空白即清除），并立即落盘。</summary>
+    public void SetNote(string? uniqueId, string? note)
+    {
+        if (string.IsNullOrWhiteSpace(uniqueId))
+            return;
+
+        if (string.IsNullOrWhiteSpace(note))
+            ModNotes.Remove(uniqueId);
+        else
+            ModNotes[uniqueId] = note.Trim();
+
+        Save();
+    }
+
     private static readonly string ConfigPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "StardewToolkit", "config.json");

@@ -356,8 +356,24 @@ internal sealed class ModernButton : Button
 internal sealed class TextField : Panel
 {
     private bool _focused;
+    private string? _leadingGlyph;
 
     public TextBox Box { get; }
+
+    /// <summary>左侧图标字形（如搜索放大镜）。为空则不占位。</summary>
+    public string? LeadingGlyph
+    {
+        get => _leadingGlyph;
+        set
+        {
+            _leadingGlyph = value;
+            // 对象初始化器在构造之后才赋值，这里重新摆一次内部 TextBox
+            LayoutBox();
+            Invalidate();
+        }
+    }
+
+    public int LeadingGlyphSize { get; set; } = 10;
 
     public TextField(string placeholder = "", bool password = false)
     {
@@ -383,23 +399,42 @@ internal sealed class TextField : Panel
         Click += (_, _) => Box.Focus();
     }
 
+    private int LeadingWidth => string.IsNullOrEmpty(_leadingGlyph) ? 0 : 28;
+
+    private void LayoutBox()
+    {
+        if (Box is null)
+            return;
+        int x = 12 + LeadingWidth;
+        int y = Math.Max(0, (Height - Box.PreferredHeight) / 2);
+        Box.SetBounds(x, y, Math.Max(20, Width - x - 12), Box.PreferredHeight);
+    }
+
     protected override void OnResize(EventArgs eventargs)
     {
         base.OnResize(eventargs);
-        if (Box is null)
-            return;
-        int x = 12;
-        int y = Math.Max(0, (Height - Box.PreferredHeight) / 2);
-        Box.SetBounds(x, y, Math.Max(20, Width - x * 2), Box.PreferredHeight);
+        LayoutBox();
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        e.Graphics.Clear(BackColor);
+        var g = e.Graphics;
+        g.Clear(BackColor);
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-        Theme.DrawRounded(e.Graphics, rect, 8, Theme.SurfaceRaised,
+        Theme.DrawRounded(g, rect, 8, Theme.SurfaceRaised,
             _focused ? Theme.Accent : Theme.Border);
+
         base.OnPaint(e);
+
+        // 左侧图标画在 base.OnPaint 之后，否则会被子控件重绘盖掉
+        if (!string.IsNullOrEmpty(_leadingGlyph))
+        {
+            using var iconFont = Theme.IconFont(LeadingGlyphSize);
+            TextRenderer.DrawText(g, _leadingGlyph, iconFont,
+                new Rectangle(12, 0, 16, Height),
+                _focused ? Theme.TextMuted : Theme.TextDim,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.Left);
+        }
     }
 }
 
