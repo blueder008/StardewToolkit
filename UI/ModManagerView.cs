@@ -18,7 +18,7 @@ internal sealed class ModManagerView : UserControl
     private string ModsDir => Path.Combine(_gamePath, "Mods");
 
     /// <summary>打开本窗口前想聚焦的 mod 名（日志查看器联动跳转用）；扫描完成后顶到筛选框里。</summary>
-    private readonly string? _focusMod;
+    private string? _focusMod;
 
     private List<ModEntry> _mods = [];
     private readonly Dictionary<string, ModUpdateData> _updateMap = new(StringComparer.OrdinalIgnoreCase);
@@ -324,6 +324,20 @@ internal sealed class ModManagerView : UserControl
         root.Controls.Add(summaryRow, 0, 3);
 
         Controls.Add(root);
+    }
+
+    /// <summary>日志查看器跳转：预填筛选框并选中对应 mod。</summary>
+    public void ApplyFocusMod(string modName)
+    {
+        _focusMod = modName;
+        _focusApplied = false;
+        _filterField.Box.Text = modName;
+        // RefreshList 由 TextChanged 触发；再补一次选中
+        if (_list.Items.Count > 0)
+        {
+            _list.Items[0].Selected = true;
+            _list.Items[0].Focused = true;
+        }
     }
 
     /// <summary>末列吃掉剩余宽度，避免列表右侧出现系统默认的白色空档。</summary>
@@ -883,7 +897,21 @@ internal sealed class ModManagerView : UserControl
         }
 
         var workspace = Path.Combine(SmapiInstallerRunner.WorkspaceDirPath, "mod-updates");
-        var zipPath = await _gitHub.DownloadAsync(release, workspace, Log);
+        string zipPath;
+        try
+        {
+            zipPath = await _gitHub.DownloadAsync(release, workspace, Log);
+        }
+        catch (Exception ex)
+        {
+            // GitHub 直连下载失败 → 换镜像前缀重试（SMAPI 安装器同款兜底链），
+            // 镜像也全挂才放弃，提示走「更新页面」手动下载。
+            Log($"⚠ GitHub 直连下载失败：{ex.Message}，尝试镜像…");
+            zipPath = await DownloadFromMirrorsAsync(release, workspace)
+                      ?? throw new InvalidOperationException(
+                          "GitHub 与全部镜像都下载失败，请点「更新页面」手动下载 zip，再「安装 zip…」导入。");
+        }
+
         var report = await ModPackageInstaller.InstallFromZipAsync(zipPath, ModsDir, Log);
         if (report.Success)
             Log($"✅ {entry.Name}: {report.Primary.OldVersion ?? "首次安装"} → {report.Primary.NewVersion}");
@@ -892,6 +920,33 @@ internal sealed class ModManagerView : UserControl
                 "更新失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
         await RescanSilentAsync();
+    }
+
+    /// <summary>
+    /// GitHub mod 包的镜像兜底下载：直连失败后按 gh-proxy / ghfast / ghproxy 镜像逐个重试。
+    /// 全部失败返回 null（mod 包没有官方哈希可校验，只信任 GitHub 域名与这几家镜像）。
+    /// </summary>
+    private static readonly string[] GitHubMirrorPrefixes =
+    [
+        "https://gh-proxy.com/",
+        "https://ghfast.top/",
+        "https://ghproxy.net/",
+    ];
+
+    private async Task<string?> DownloadFromMirrorsAsync(GitHubModRelease release, string destDir)
+    {
+        foreach (var prefix in GitHubMirrorPrefixes)
+        {
+            try
+            {
+                return await _gitHub.DownloadAsync(release, destDir, Log, ct: default, mirrorPrefix: prefix);
+            }
+            catch (Exception ex)
+            {
+                Log($"  ✗ 镜像 {new Uri(prefix).Host} 失败：{ex.Message}");
+            }
+        }
+        return null;
     }
 
     /// <summary>Nexus 更新键分支：查最新主文件 → 版本确认 → 下载安装（Premium）；403 时转浏览器手动兜底。</summary>
@@ -954,11 +1009,7 @@ internal sealed class ModManagerView : UserControl
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
             if (manual == DialogResult.OK)
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = $"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}",
-                    UseShellExecute = true,
-                });
+                ShellHelper.OpenUrl($"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}");
                 Log("官方文件页已打开。浏览器下载 zip 后，点「安装 zip…」选择它完成更新。");
             }
             else
@@ -1206,18 +1257,8 @@ internal sealed class ModManagerView : UserControl
             return;
         }
 
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Msg.Show(this, $"打开浏览器失败：{ex.Message}\n\n{url}", "失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        if (!ShellHelper.OpenUrl(url))
+            Msg.Show(this, $"打开浏览器失败。\n\n{url}", "失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     /// <summary>优先用接口给的地址，否则从 update key 猜（Nexus:123 → nexusmods 的 mod 页）。</summary>

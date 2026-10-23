@@ -19,6 +19,8 @@ internal sealed class LogViewerForm : Form
     private List<(ListViewItem Item, SmapiLogEntry Entry)> _rows = [];  // 可见行（已按过滤裁掉）
     private string? _loadedPath;
     private string _summaryBase = "";      // 概要的主体（加载文件后写入），过滤结果会追加尾巴
+    private bool _loadingAppLog;           // 当前下拉选中的是「本工具操作日志」还是 SMAPI 日志
+    private List<LogEntry> _fileEntries = [];
 
     /*********
     ** 控件
@@ -304,49 +306,68 @@ internal sealed class LogViewerForm : Form
     ** 加载
     *********/
     /// <summary>重新列出日志目录里的文件。<paramref name="keepFilter"/> 选中 ALARM 保持当前选择（手动点「刷新列表」时用）。</summary>
+    /// <summary>
+    /// 下拉里合并两类日志：
+    ///   [工具] app-yyyyMMdd.log  —— 本工具自己的操作流水（SMAPI 安装/更新、mod 安装等）
+    ///   SMAPI-latest.txt …      —— 游戏的 SMAPI 日志
+    /// 工具日志永远排最前（这是用户最常看的）。
+    /// </summary>
     private async Task LoadFileListAsync(bool keepFilter = false)
     {
-        var files = SmapiLogParser.GetLogFiles();
+        var smapiFiles = SmapiLogParser.GetLogFiles();
+        var appFiles = AppLog.GetFiles();
+        _fileEntries = [.. appFiles.Select(f => new LogEntry(f, true)),
+                        .. smapiFiles.Select(f => new LogEntry(f, false))];
+
         var selectedPath = keepFilter ? _loadedPath : null;
 
         _fileSelector.BeginUpdate();
         try
         {
             _fileSelector.Items.Clear();
-            foreach (var f in files)
-                _fileSelector.Items.Add($"{f.Name}（{f.LastWriteTime:MM-dd HH:mm}，{f.Length / 1024.0:F0} KB）");
+            foreach (var e in _fileEntries)
+            {
+                var tag = e.IsAppLog ? "[工具] " : "";
+                _fileSelector.Items.Add($"{tag}{e.File.Name}（{e.File.LastWriteTime:MM-dd HH:mm}，{Math.Max(1, e.File.Length / 1024.0):F0} KB）");
+            }
         }
         finally
         {
             _fileSelector.EndUpdate();
         }
 
-        if (files.Count == 0)
+        if (_fileEntries.Count == 0)
         {
-            _summary.Text = $"还没找到日志：{GameInspector.ErrorLogDirectory}\n" +
-                            "开始游戏一次（用 SMAPI 启动会自动生成日志），或者手动打开目录看看。";
+            _summary.Text = "还没有任何日志。\n" +
+                            "· 本工具的操作日志在装/卸 SMAPI、安装 mod 后产生\n" +
+                            "· SMAPI 日志在用 SMAPI 启动一次游戏后产生\n" +
+                            GameInspector.ErrorLogDirectory;
             return;
         }
 
-        // 默认最新一条；SMAPI-crash.txt（崩溃现场）优先级最高，直接选它并给横幅提示
+        // 默认选中：优先记住上次看的；否则最新一条工具日志；否则 SMAPI 最新
         int select = 0;
-        if (_loadedPath is null)
+        if (_loadedPath is not null)
         {
-            var crash = files.FindIndex(f => string.Equals(f.Name, "SMAPI-crash.txt", StringComparison.OrdinalIgnoreCase));
-            if (crash >= 0)
-                select = crash;
-        }
-        else
-        {
-            var kept = files.FindIndex(f => SamePath(f.FullName, selectedPath ?? _loadedPath));
+            var kept = _fileEntries.FindIndex(e => SamePath(e.File.FullName, selectedPath ?? _loadedPath));
             if (kept >= 0)
                 select = kept;
+        }
+        else if (appFiles.Count == 0)
+        {
+            // 没有 SMAPI-crash 优先逻辑要照顾（工具日志不存在时才用原逻辑）
+            var crash = smapiFiles.FindIndex(f => string.Equals(f.Name, "SMAPI-crash.txt", StringComparison.OrdinalIgnoreCase));
+            if (crash >= 0)
+                select = appFiles.Count + crash;
         }
 
         _fileSelector.SelectedIndex = select; // 触发 LoadSelectedFileAsync
         if (_fileSelector.SelectedIndex < 0)
             await SelectFirstFileAsync();
     }
+
+    /// <summary>下拉里的一项：文件 + 是不是本工具日志。</summary>
+    private sealed record LogEntry(FileInfo File, bool IsAppLog);
 
     private async Task SelectFirstFileAsync()
     {
@@ -359,13 +380,95 @@ internal sealed class LogViewerForm : Form
 
     private async Task LoadSelectedFileAsync()
     {
-        var files = SmapiLogParser.GetLogFiles();
         int index = _fileSelector.SelectedIndex;
-        if (index < 0 || index >= files.Count)
+        if (index < 0 || index >= _fileEntries.Count)
             return;
 
-        var file = files[index];
+        var entry = _fileEntries[index];
         SetBusy(true);
+        try
+        {
+            if (entry.IsAppLog)
+                await LoadAppLogAsync(entry.File);
+            else
+                await LoadSmapiLogAsync(entry.File);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    /// <summary>加载本工具的操作日志：直接按行读，级别从消息前缀推断。</summary>
+    private async Task LoadAppLogAsync(FileInfo file)
+    {
+        _loadingAppLog = true;
+        _summary.Text = $"读取中… {file.Name}";
+        try
+        {
+            var text = await File.ReadAllTextAsync(file.FullName);
+            var entries = new List<SmapiLogEntry>();
+            int lineNo = 0;
+            foreach (var raw in text.Split('\n'))
+            {
+                lineNo++;
+                var line = raw.TrimEnd('\r');
+                if (line.Length == 0)
+                    continue;
+
+                // [HH:mm:ss] 消息
+                string time = "", message = line;
+                if (line.StartsWith('['))
+                {
+                    int close = line.IndexOf("] ");
+                    if (close > 0)
+                    {
+                        time = line[1..close];
+                        message = line[(close + 2)..];
+                    }
+                }
+
+                string level = message.StartsWith("❌") || message.StartsWith("🗑")
+                    ? "ERROR"
+                    : message.StartsWith("⚠") || message.StartsWith("🔴")
+                        ? "WARN"
+                        : message.StartsWith("✅")
+                            ? "INFO"
+                            : "INFO";
+
+                entries.Add(new SmapiLogEntry(lineNo, time, level, "工具", message));
+            }
+
+            // 倒序展示（最新的在最上，工具日志通常只有几十行，SMAPI 那种滚动定位没必要）
+            entries.Reverse();
+            _allEntries = entries;
+            _meta = new SmapiLogMeta(null, null, null, null, null);
+            _loadedPath = file.FullName;
+
+            // 工具日志没有 mod 定位语义
+            _btnLocateMod.Enabled = false;
+
+            int errors = entries.Count(e => e.IsError);
+            _errorPill.Text = $"{errors} 条错误";
+            _warnPill.Text = $"{entries.Count(e => e.Level == "WARN")} 条警告";
+
+            _summaryBase = $"本工具操作日志 · 共 {entries.Count} 条" +
+                (errors > 0 ? $" · {errors} 条错误" : "");
+            _summary.ForeColor = errors > 0 ? Theme.Danger : Theme.TextMuted;
+            _summary.Text = _summaryBase;
+            RebuildVisible();
+        }
+        catch (Exception ex)
+        {
+            _summary.ForeColor = Theme.Danger;
+            _summary.Text = $"读取日志失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>加载 SMAPI 日志（原有逻辑抽到这里）。</summary>
+    private async Task LoadSmapiLogAsync(FileInfo file)
+    {
+        _loadingAppLog = false;
         try
         {
             _summary.Text = $"读取中… {file.Name}";
@@ -376,13 +479,13 @@ internal sealed class LogViewerForm : Form
 
             var parts = new List<string>();
             if (_meta.SmapiVersion is { } smapi)
-                parts.Add($"SMAPI {smapi}");
+                parts.Add("SMAPI {smapi}");
             if (_meta.GameVersion is { } game)
-                parts.Add($"游戏 {game}");
+                parts.Add("游戏 {game}");
             if (_meta.ModCount is { } mods)
-                parts.Add($"{mods} 个 mod");
+                parts.Add("{mods} 个 mod");
             if (_meta.LogStartedAt is { } started)
-                parts.Add($"记录于 {started.Trim()}");
+                parts.Add("记录于 {started.Trim()}");
 
             int errors = _allEntries.Count(e => e.IsError);
             int warns = _allEntries.Count(e => e.Level is "ALERT" or "WARN");
@@ -417,10 +520,6 @@ internal sealed class LogViewerForm : Form
             _summary.ForeColor = Theme.Danger;
             _summary.Text = $"读取日志失败：{ex.Message}";
             _errorPill.Text = "读取失败";
-        }
-        finally
-        {
-            SetBusy(false);
         }
     }
 
@@ -569,8 +668,19 @@ internal sealed class LogViewerForm : Form
         var modName = System.Text.RegularExpressions.Regex
             .Replace(entry.Source, @"^screen_\d+\s+", "").Trim();
 
-        using var manager = new ModManagerForm(gamePath, modName);
-        manager.ShowDialog(this);
+        // 新骨架：Mod 管理区内嵌在主窗口。把要定位的 mod 名传给主窗，
+        // 让它重建视图并预填筛选框，然后本窗口收起。
+        if (Owner is MainForm main)
+        {
+            main.FocusMod(modName, gamePath);
+            Hide();
+        }
+        else
+        {
+            using var main2 = new MainForm();
+            main2.Show();
+            main2.FocusMod(modName, gamePath);
+        }
     }
 
     private void JumpToNextError()

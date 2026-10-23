@@ -9,6 +9,14 @@ namespace StardewToolkit.UI;
 internal sealed class MainForm : Form
 {
     /*********
+    ** Nexus 备选下载渠道
+    *********/
+    /// <summary>Nexus 上的 SMAPI 官方页面（mod 2400，Pathoschild 本人维护的上传）：
+    /// GitHub 直连和镜像全都下载失败时的备选渠道。</summary>
+    private const string SmapiNexusPageUrl = "https://www.nexusmods.com/stardewvalley/mods/2400";
+    private const long SmapiNexusModId = 2400;
+
+    /*********
     ** 状态
     *********/
     private readonly AppConfig _config = AppConfig.Load();
@@ -664,9 +672,30 @@ internal sealed class MainForm : Form
             }
             else
             {
-                latest = _latestRelease ?? await _service.GetLatestAsync();
-                Log($"目标版本：SMAPI {latest.TagName}");
-                zipPath = await GetInstallerZipAsync(latest);
+                SmapiRelease? tryLatest = null;
+                try
+                {
+                    tryLatest = _latestRelease ?? await _service.GetLatestAsync();
+                    Log($"目标版本：SMAPI {tryLatest.TagName}");
+                    zipPath = await GetInstallerZipAsync(tryLatest)
+                              ?? throw new OperationCanceledException("下载已中止。");
+                    latest = tryLatest;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    // GitHub 彻底连不上（连最新版本信息都拿不到）→ 走 Nexus 官方页面兜底：
+                    // 有 key 时直接从 Nexus 自动下载；没有 key 就打开 Nexus 页面引导浏览器下载。
+                    var nexusZip = await DownloadViaNexusFallbackAsync(Log);
+                    if (nexusZip is null)
+                        throw new OperationCanceledException("下载已中止。");
+
+                    zipPath = nexusZip;
+                    latest = null; // GitHub 信息拿不到，版本号装完后从游戏目录读取
+                }
             }
 
             var runner = new SmapiInstallerRunner(zipPath);
@@ -802,6 +831,13 @@ internal sealed class MainForm : Form
             {
                 Log($"❌ 自动下载失败：{ex.Message}");
                 Log($"手动下载地址：{release.DownloadUrl}");
+
+                // GitHub 全部下载源（直连 + 镜像）都失败 → 转走 Nexus 官方页面（mod 2400）兜底
+                var nexusZip = await DownloadViaNexusFallbackAsync(Log);
+                if (nexusZip is not null)
+                    return nexusZip;
+
+                // Nexus 兜底也没成（用户取消或同样失败）→ 保留原来的手动选文件流程
                 return await PickInstallerManuallyAsync(release);
             }
         }
@@ -809,6 +845,138 @@ internal sealed class MainForm : Form
         {
             _zipGate.Release();
         }
+    }
+
+    /*********
+    ** Nexus 备选下载渠道（GitHub 全挂时用）
+    *********/
+    /// <summary>
+    /// GitHub 下载全部失败后的 Nexus 兜底（官方页面 {SmapiNexusPageUrl}）：
+    ///   1. 已保存 Nexus API key → 自动拿 SMAPI 的最新主文件尝试下载：
+    ///      Premium 会员能直接下成功；免费账号 Nexus 会拒绝（403），自动转第 2 步。
+    ///   2. 没 key 或 403 → 自动打开 Nexus 的 SMAPI 文件页，用户在浏览器里下载 zip
+    ///      后选回来。zip 本身仍过官方 SHA-256 校验（哈希来自 GitHub release 信息，
+    ///      GitHub 也连不上时按官方渠道提醒确认后放行）。
+    /// 用户中途取消返回 null。
+    /// </summary>
+    private async Task<string?> DownloadViaNexusFallbackAsync(Action<string> log)
+    {
+        log("GitHub 下载不通，改走 Nexus 官方页面（stardewvalley/mods/2400）…");
+
+        var apiKey = _config.NexusApiKey;
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            var client = new NexusClient(apiKey);
+            try
+            {
+                var file = await client.GetLatestMainFileAsync(SmapiNexusModId);
+                log($"Nexus 上的 SMAPI 主文件：{file.FileName ?? file.Name}（版本 {file.ModVersion ?? file.Version ?? "?"}）");
+
+                var workspace = SmapiInstallerRunner.WorkspaceDirPath;
+                var zipPath = await client.DownloadAsync(SmapiNexusModId, workspace, log, file: file);
+
+                // 有 GitHub 的官方哈希就照常校验（Nexus 上传的就是同一个文件，应当一致）
+                if (_latestRelease is { } rel && !string.IsNullOrWhiteSpace(rel.Sha256))
+                {
+                    log("校验 Nexus 下载的安装包（对照官方 SHA-256）…");
+                    var hash = await GitHubReleaseService.ComputeSha256Async(zipPath);
+                    if (!string.Equals(hash, rel.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        File.Delete(zipPath);
+                        log("❌ Nexus 下载的安装包哈希校验失败，已删除。转浏览器手动下载流程。");
+                        return await OpenNexusPageAndPickAsync(log);
+                    }
+                    log("✅ 安装包校验通过。");
+                }
+
+                log("✅ 已从 Nexus 下载 SMAPI 安装包。");
+                return zipPath;
+            }
+            catch (NexusApiException ex) when (ex.StatusCode is 401 or 403)
+            {
+                // 免费账号 API 直下会被拒（403），key 失效是 401 —— 都不中断流程，转浏览器引导
+                log($"Nexus API 下载被拒（{ex.StatusCode}）：{ex.Message}");
+                log("转浏览器手动下载流程。");
+            }
+            catch (Exception ex)
+            {
+                log($"⚠ Nexus API 下载失败：{ex.Message}\n转浏览器手动下载流程。");
+            }
+        }
+        else
+        {
+            log("未配置 Nexus API key，走浏览器手动下载流程（免费账号也能用）。");
+        }
+
+        return await OpenNexusPageAndPickAsync(log);
+    }
+
+    /// <summary>打开 Nexus 的 SMAPI 文件页，等用户浏览器下载 zip 后选回来安装。取消返回 null。</summary>
+    private async Task<string?> OpenNexusPageAndPickAsync(Action<string> log)
+    {
+        log($"打开 Nexus 文件页：{SmapiNexusPageUrl}");
+
+        var opened = ShellHelper.OpenUrl(SmapiNexusPageUrl + "?tab=files");
+        if (!opened)
+            log($"⚠ 自动打开浏览器失败，请手动访问上面的地址。");
+
+        var choice = Msg.Show(this,
+            "GitHub 下载全部失败，已切换到 Nexus 官方页面。\n\n" +
+            "已为你打开浏览器：\n" +
+            $"    {SmapiNexusPageUrl}\n\n" +
+            "在 Nexus 页面点「MOD FILES → Manual Download」（免费账号也可下载），\n" +
+            "下载完成后回到这里选择 zip 文件，程序会校验后自动安装。\n\n" +
+            "选好了安装包文件吗？",
+            "Nexus 备选下载", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+        if (choice != DialogResult.Yes)
+        {
+            log("用户没有选择 Nexus 下载的安装包。");
+            return null;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = "选择从 Nexus 下载的 SMAPI 安装包 zip",
+            Filter = "SMAPI 安装包 (*.zip)|*.zip|所有文件 (*.*)|*.*",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            log("未选择安装包文件。");
+            return null;
+        }
+
+        var zip = dialog.FileName;
+        log($"Nexus 手动导入安装包：{zip}");
+
+        // 有 GitHub 的官方哈希就照常校验（Nexus 上传的就是同一个文件，应当一致）
+        if (_latestRelease is { } release && !string.IsNullOrWhiteSpace(release.Sha256))
+        {
+            log("校验安装包（对照官方 SHA-256）…");
+            var hash = await GitHubReleaseService.ComputeSha256Async(zip);
+            if (!string.Equals(hash, release.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "校验失败：选择的文件与官方 SMAPI " + release.TagName + " 不一致。\n" +
+                    "文件哈希: " + hash + "\n" +
+                    "官方哈希: " + release.Sha256 + "\n\n" +
+                    "请确认下载的是 Nexus 上的 SMAPI 安装器 zip（而不是别的文件）后重试。");
+            log("✅ 安装包校验通过。");
+        }
+        else
+        {
+            // GitHub 连版本信息都拿不到，没有官方哈希可对照 —— 明确告知后按官方渠道放行
+            var force = Msg.Show(this,
+                "暂时连不上 GitHub，无法对照官方 SHA-256 校验这个文件。\n" +
+                "Nexus 页面下载的 SMAPI 由作者本人维护，一般是安全的；\n" +
+                "SMAPI 4.5+ 的安装器也自带恶意文件检测。\n\n继续安装？",
+                "无法校验", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (force != DialogResult.Yes)
+            {
+                log("用户取消安装（未通过校验确认）。");
+                return null;
+            }
+        }
+
+        return zip;
     }
 
     private IProgress<(long Done, long Total)> CreateDownloadProgress()
@@ -982,6 +1150,9 @@ internal sealed class MainForm : Form
     *********/
     private void Log(string message)
     {
+        // 全部落盘：日志查看器的来源下拉里可以选「本工具操作日志」回看完整历史
+        Services.AppLog.Write(message);
+
         if (InvokeRequired)
         {
             BeginInvoke(() => Log(message));
@@ -990,8 +1161,7 @@ internal sealed class MainForm : Form
         if (IsDisposed)
             return;
 
-        // 新骨架里主窗口不再常驻日志面板：日志仍完整写进 LogViewerForm 的来源文件，
-        // 这里把最近一条操作反馈显示在折叠条上，够用且不占版面。
+        // 折叠条显示最近一条操作反馈（完整历史去「日志 → 本工具操作日志」看）
         if (_smapiSummary is not null)
         {
             _smapiSummary.Text = message;
@@ -1055,6 +1225,27 @@ internal sealed class MainForm : Form
         _modHost.Controls.Add(_modView);
         _modView.Logged += Log;
         _modView.OpenDownloads = ShowDownloadQueue;
+    }
+
+    /// <summary>
+    /// 日志查看器跳转过来：定位到指定游戏目录的 Mod 管理区，并预填筛选框。
+    /// </summary>
+    public void FocusMod(string modName, string gamePath)
+    {
+        Activate();
+        EnsureModView();
+
+        if (_modView is not null && !SamePath(_modView.GamePath, gamePath))
+        {
+            // 目标游戏和当前的不同：切换目标再重建视图
+            _config.LastGamePath = gamePath;
+            _config.Save();
+            DetectGames();
+            ReloadModView();
+        }
+
+        if (_modView is not null)
+            _modView.ApplyFocusMod(modName);
     }
 
     /// <summary>打开下载队列窗口。</summary>
