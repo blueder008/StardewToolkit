@@ -28,7 +28,6 @@ internal sealed class MainForm : Form
     private ModernButton _btnExpandSmapi = null!;
     private Panel _modHost = null!;
     private ModManagerView? _modView;
-    private ModernButton _btnDownloads = null!;
 
     private StatusList _statusList = null!;
     private ModernButton _btnInstall = null!;
@@ -97,19 +96,17 @@ internal sealed class MainForm : Form
             BackColor = Theme.Bg,
             Padding = new Padding(0),
         };
-        // 0 顶栏 / 1 SMAPI 折叠条 / 2 SMAPI 展开体 / 3 Mod 管理区 / 4 状态栏
+        // 0 顶栏 / 1 SMAPI 折叠条 / 2 SMAPI 展开体 / 3 Mod 管理区（含统计与下载）
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
 
         _rootLayout = root;
         root.Controls.Add(BuildTopBar(), 0, 0);
         root.Controls.Add(BuildSmapiStrip(), 0, 1);
         root.Controls.Add(BuildSmapiBody(), 0, 2);
         root.Controls.Add(BuildModArea(), 0, 3);
-        root.Controls.Add(BuildStatusBar(), 0, 4);
 
         Controls.Add(root);
     }
@@ -330,38 +327,6 @@ internal sealed class MainForm : Form
     {
         _modHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
         return _modHost;
-    }
-
-    /// <summary>状态栏：统计已由 Mod 管理区内的统计行承担，这里只放右侧的下载入口。</summary>
-    private Control BuildStatusBar()
-    {
-        var bar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.BgSoft };
-
-        var right = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Right,
-            AutoSize = true,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            BackColor = Theme.BgSoft,
-            Padding = new Padding(0, 4, 14, 0),
-        };
-        _btnDownloads = new ModernButton
-        {
-            Text = "下载",
-            Glyph = "\uE896",
-            GlyphSize = 10,
-            Variant = ButtonVariant.Ghost,
-            AutoSize = true,
-            Height = 26,
-            Font = Theme.Ui(8.5f),
-            Margin = new Padding(0),
-        };
-        _btnDownloads.Click += (_, _) => ShowDownloadQueue();
-        right.Controls.Add(_btnDownloads);
-        bar.Controls.Add(right);
-
-        return bar;
     }
 
     /*********
@@ -1089,6 +1054,7 @@ internal sealed class MainForm : Form
         _modView = new ModManagerView(target) { Dock = DockStyle.Fill };
         _modHost.Controls.Add(_modView);
         _modView.Logged += Log;
+        _modView.OpenDownloads = ShowDownloadQueue;
     }
 
     /// <summary>打开下载队列窗口。</summary>

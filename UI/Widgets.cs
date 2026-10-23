@@ -438,14 +438,40 @@ internal sealed class TextField : Panel
     }
 }
 
-/// <summary>自绘勾选框：暗底 + 绿色选中态。</summary>
-internal sealed class ModernCheckBox : CheckBox
+/// <summary>
+/// 自绘勾选框：暗底 + 绿色选中态。
+/// 刻意继承 Control 而不是 CheckBox——CheckBox 基类在透明背景合成（WM_PRINTCLIENT）时
+/// 会用系统样式再画一遍文字，和自绘文字错位形成「重影」。纯 Control 没有这条绘制路径。
+/// </summary>
+internal sealed class ModernCheckBox : Control
 {
+    private bool _hover;
+    private bool _checked;
+
+    /// <summary>勾选状态变化时触发。</summary>
+    public new event EventHandler? CheckedChanged;
+
+    [System.ComponentModel.DefaultValue(false)]
+    public new bool Checked
+    {
+        get => _checked;
+        set
+        {
+            if (_checked == value)
+                return;
+            _checked = value;
+            Invalidate();
+            CheckedChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
     public ModernCheckBox()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        AutoSize = true;
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
+                 | ControlStyles.SupportsTransparentBackColor
+                 | ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, true);
+        AutoSize = true;     // FlowLayoutPanel 里按 GetPreferredSize 取宽
         Font = Theme.Ui(9f);
         ForeColor = Theme.TextMuted;
         Cursor = Cursors.Hand;
@@ -459,6 +485,27 @@ internal sealed class ModernCheckBox : CheckBox
         // 按控件实际字体测量，避免高 DPI 下文字被挤掉。
         var text = TextRenderer.MeasureText(Text, Font);
         return new Size(24 + text.Width + 6, Math.Max(24, text.Height + 8));
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hover = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hover = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnClick(EventArgs e)
+    {
+        // Control 不带勾选切换语义，这里自己实现
+        Checked = !Checked;
+        base.OnClick(e);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -484,7 +531,8 @@ internal sealed class ModernCheckBox : CheckBox
         }
         else
         {
-            Theme.DrawRounded(g, box, 4, Theme.SurfaceRaised, Theme.BorderStrong);
+            Theme.DrawRounded(g, box, 4,
+                _hover ? Theme.SurfaceHover : Theme.SurfaceRaised, Theme.BorderStrong);
         }
 
         var textColor = Enabled ? (Checked ? Theme.Text : Theme.TextMuted) : Theme.TextDim;

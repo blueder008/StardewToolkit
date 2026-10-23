@@ -1,4 +1,4 @@
-using StardewToolkit.Services;
+﻿using StardewToolkit.Services;
 
 namespace StardewToolkit.UI;
 
@@ -51,6 +51,7 @@ internal sealed class ModManagerView : UserControl
     private Pill _pillUpdates = null!;
     private Pill _pillBroken = null!;
     private Pill _pillDisabled = null!;
+    private ModernButton _btnDownloads = null!;
 
     /// <summary>鼠标按下时落在某个勾选框上，抬起时同一格才认为是「点勾选框」。</summary>
     private int _pendingCheckIndex = -1;
@@ -260,13 +261,49 @@ internal sealed class ModManagerView : UserControl
         listCard.Controls.Add(listHeader);
         root.Controls.Add(listCard, 0, 2);
 
-        // ---- 3: 统计（左下角三个数量 + 异常/已禁用） ----
-        var summaryRow = new FlowLayoutPanel
+        // ---- 3: 统计行（左侧数量，右侧下载入口，同一行） ----
+        // 结构：根 Panel 里 pills(Fill) + 按钮容器(Dock.Right)。
+        // 不用 TableLayoutPanel 的按钮列——Ghost 按钮在 AutoSize 列里会被布局吞掉。
+        var summaryRow = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0),
+            Padding = new Padding(2, 0, 22, 0),
+            Height = 32,
+        };
+
+        var btnHost = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0),
+            Padding = new Padding(0, 0, 10, 0),   // Padding 才影响 Dock 布局；Margin 不影响
+        };
+        _btnDownloads = new ModernButton
+        {
+            Text = "下载",
+            Glyph = "\uE896",
+            GlyphSize = 10,
+            Variant = ButtonVariant.Ghost,
+            AutoSize = true,
+            Height = 26,
+            Font = Theme.Ui(8.5f),
+            Margin = new Padding(0),
+        };
+        _btnDownloads.Click += (_, _) => OpenDownloads?.Invoke();
+        btnHost.Controls.Add(_btnDownloads);
+        summaryRow.Controls.Add(btnHost);
+
+        var pills = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             BackColor = Theme.Bg,
             WrapContents = false,
-            Padding = new Padding(2, 4, 0, 0),
             Margin = new Padding(0),
         };
         _summary = new Label
@@ -281,7 +318,9 @@ internal sealed class ModManagerView : UserControl
         _pillUpdates = new Pill("可更新 0", Theme.Warn) { Margin = new Padding(0, 2, 6, 0) };
         _pillBroken = new Pill("异常 0", Theme.Danger) { Margin = new Padding(0, 2, 6, 0) };
         _pillDisabled = new Pill("已禁用 0", Theme.TextMuted) { Margin = new Padding(0, 2, 6, 0) };
-        summaryRow.Controls.AddRange([_summary, _pillOn, _pillUpdates, _pillBroken, _pillDisabled]);
+        pills.Controls.AddRange([_summary, _pillOn, _pillUpdates, _pillBroken, _pillDisabled]);
+        summaryRow.Controls.Add(pills);
+
         root.Controls.Add(summaryRow, 0, 3);
 
         Controls.Add(root);
@@ -1294,6 +1333,9 @@ internal sealed class ModManagerView : UserControl
     *********/
     /// <summary>操作日志事件：主窗口把它显示在折叠条上，界面里不再常驻日志面板。</summary>
     public event Action<string>? Logged;
+
+    /// <summary>宿主提供的「打开下载队列」动作（下载按钮在统计行右侧）。</summary>
+    public Action? OpenDownloads { get; set; }
 
     private void Log(string message) => Logged?.Invoke(message);
 }
