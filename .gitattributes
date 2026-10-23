@@ -1,0 +1,14 @@
+# 统一换行符策略，避免 Windows/Linux 协作时的 LF/CRLF 噪音
+* text=auto eol=crlf
+
+*.cs     text eol=crlf
+*.csproj text eol=crlf
+*.md     text eol=crlf
+*.json   text eol=crlf
+
+*.png    binary
+*.jpg    binary
+*.ico    binary
+*.exe    binary
+*.dll    binary
+*.zip    binary

@@ -1,0 +1,17 @@
+# 构建产物
+bin/
+obj/
+*.user
+.vs/
+
+# 发布产物
+publish/
+*.pdb
+
+# 分析/预览截图（本地临时产物，不入库）
+.ui-shots/
+
+# 会话残留 / 临时文件
+ses_*.json
+*.tmp
+*.log
