@@ -1,4 +1,4 @@
-﻿using StardewToolkit.Services;
+using StardewToolkit.Services;
 
 namespace StardewToolkit.UI;
 
@@ -56,8 +56,23 @@ internal sealed class ModManagerView : UserControl
     /// <summary>鼠标按下时落在某个勾选框上，抬起时同一格才认为是「点勾选框」。</summary>
     private int _pendingCheckIndex = -1;
 
+    /// <summary>备注列行内编辑框（双击备注单元格时出现），null = 没有在编辑。</summary>
+    private TextBox? _noteEditor;
+    private ListViewItem? _noteEditItem;
+
     /// <summary>列表为空时显示的提示。</summary>
     private EmptyHint _emptyHint = null!;
+
+    /// <summary>网格视图（与列表互斥）。</summary>
+    private ModGrid _grid = null!;
+    private ModernButton _btnListView = null!;
+    private ModernButton _btnGridView = null!;
+
+    /// <summary>当前是否网格视图。</summary>
+    private bool _gridMode;
+
+    /// <summary>封面异步加载去重（同一个 mod 只发起一次）。</summary>
+    private readonly HashSet<long> _coverRequested = [];
 
     /// <summary>宿主用：当前管理哪个游戏目录。</summary>
     public string GamePath => _gamePath;
@@ -199,16 +214,17 @@ internal sealed class ModManagerView : UserControl
         };
         _list.Columns.AddRange(
         [
-            new ColumnHeader { Text = "  Mod 名称", Width = 210 },
-            new ColumnHeader { Text = "已装版本", Width = 100 },
-            new ColumnHeader { Text = "最新版本", Width = 100 },
-            new ColumnHeader { Text = "状态", Width = 190 },
-            new ColumnHeader { Text = "作者", Width = 108 },
-            new ColumnHeader { Text = "MOD ID", Width = 160 },
-            new ColumnHeader { Text = "位置", Width = 120 },
-            new ColumnHeader { Text = "备注", Width = 120 },
+            new ColumnHeader { Text = "  Mod 名称", Width = 200 },
+            new ColumnHeader { Text = "已装版本", Width = 88 },
+            new ColumnHeader { Text = "最新版本", Width = 88 },
+            new ColumnHeader { Text = "状态", Width = 170 },
+            new ColumnHeader { Text = "作者", Width = 100 },
+            new ColumnHeader { Text = "MOD ID", Width = 150 },
+            new ColumnHeader { Text = "位置", Width = 96 },
+            new ColumnHeader { Text = "备注", Width = 140 },
         ]);
-        _list.DoubleClick += (_, _) => OpenSelectedFolder();
+        // 双击备注列 = 原地编辑；双击其他列 = 打开所在文件夹
+        _list.MouseDoubleClick += OnListMouseDoubleClick;
         _list.SelectedIndexChanged += (_, _) => SyncActionButtons();
         _list.MouseDown += OnListMouseDown;
         _list.MouseUp += OnListMouseUp;
@@ -216,7 +232,7 @@ internal sealed class ModManagerView : UserControl
         _list.HandleCreated += (_, _) => StretchLastColumn();
         BuildContextMenu();
 
-        // ---- 列表标题栏：「Mod 列表」标题 + 最右侧的刷新按钮 ----
+        // ---- 列表标题栏：「Mod 列表」标题 + 视图切换 + 最右侧的刷新按钮 ----
         var listHeader = new Panel
         {
             Dock = DockStyle.Top,
@@ -232,6 +248,40 @@ internal sealed class ModManagerView : UserControl
             Location = new Point(16, 11),
             BackColor = Color.Transparent,
         });
+
+        // 视图切换（列表 / 网格）放在刷新左侧
+        var viewSwitch = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        _btnListView = new ModernButton
+        {
+            Text = "列表",
+            Variant = ButtonVariant.Primary,
+            AutoSize = true,
+            Height = 26,
+            Font = Theme.Ui(8.5f),
+            Margin = new Padding(0, 0, 6, 0),
+        };
+        _btnListView.Click += (_, _) => SwitchView(gridMode: false);
+        _btnGridView = new ModernButton
+        {
+            Text = "网格",
+            Variant = ButtonVariant.Ghost,
+            AutoSize = true,
+            Height = 26,
+            Font = Theme.Ui(8.5f),
+            Margin = new Padding(0),
+        };
+        _btnGridView.Click += (_, _) => SwitchView(gridMode: true);
+        viewSwitch.Controls.Add(_btnListView);
+        viewSwitch.Controls.Add(_btnGridView);
+        listHeader.Controls.Add(viewSwitch);
+
         _btnRescan = new ModernButton
         {
             Glyph = "\uE72C",          // 刷新
@@ -246,7 +296,11 @@ internal sealed class ModManagerView : UserControl
         _btnRescan.Location = new Point(0, 7);   // 下面按宽度贴右
         listHeader.Controls.Add(_btnRescan);
         listHeader.Resize += (_, _) =>
+        {
             _btnRescan.Location = new Point(listHeader.Width - _btnRescan.Width - 12, 7);
+            viewSwitch.Location = new Point(
+                _btnRescan.Left - viewSwitch.Width - 8, 7);
+        };
 
         // 空状态提示叠在列表上面（列表没内容时它才显示）
         _emptyHint = new EmptyHint
@@ -256,7 +310,12 @@ internal sealed class ModManagerView : UserControl
             BackColor = Theme.Surface,   // 显式底色，避免透明背景在 CardPanel 上画不出来
         };
 
+        // ---- 网格视图（与列表互斥显示） ----
+        _grid = new ModGrid { Dock = DockStyle.Fill, Visible = false };
+        _grid.ItemCheckedChanged += OnGridItemCheckedChanged;
+
         listCard.Controls.Add(_list);
+        listCard.Controls.Add(_grid);
         listCard.Controls.Add(_emptyHint);
         listCard.Controls.Add(listHeader);
         root.Controls.Add(listCard, 0, 2);
@@ -340,15 +399,25 @@ internal sealed class ModManagerView : UserControl
         }
     }
 
-    /// <summary>末列吃掉剩余宽度，避免列表右侧出现系统默认的白色空档。</summary>
+    /// <summary>
+    /// 让「状态」列（索引 3）吃掉剩余宽度，避免列表右侧出现系统默认的白色空档。
+    /// 不再拉伸备注列：备注列必须始终完整可见（固定 140px），
+    /// 否则它会被挤出可视区，双击编辑就点不到了（这次的教训）。
+    /// </summary>
     private void StretchLastColumn()
     {
         if (_list is null || _list.Columns.Count == 0 || !_list.IsHandleCreated)
             return;
         int others = 0;
-        for (int i = 0; i < _list.Columns.Count - 1; i++)
+        for (int i = 0; i < _list.Columns.Count; i++)
+        {
+            if (i == 3)
+                continue;
             others += _list.Columns[i].Width;
-        _list.Columns[^1].Width = Math.Max(140, _list.ClientSize.Width - others);
+        }
+        int stretch = _list.ClientSize.Width - others;
+        if (stretch >= 100)
+            _list.Columns[3].Width = stretch;
     }
 
     /// <summary>点第一列左侧的勾选框区域 = 切换该 mod 的启用状态。</summary>
@@ -1009,8 +1078,16 @@ internal sealed class ModManagerView : UserControl
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
             if (manual == DialogResult.OK)
             {
-                ShellHelper.OpenUrl($"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}");
-                Log("官方文件页已打开。浏览器下载 zip 后，点「安装 zip…」选择它完成更新。");
+                var pageUrl = $"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}";
+                if (await ShellHelper.OpenUrlAsync(pageUrl, Log))
+                {
+                    Log("官方文件页已打开。浏览器下载 zip 后，点「安装 zip…」选择它完成更新。");
+                }
+                else
+                {
+                    ShellHelper.TryCopyToClipboard(pageUrl);
+                    Log($"⚠ 浏览器没能打开（{ShellHelper.LastError}），链接已复制到剪贴板，可手动粘贴访问。");
+                }
             }
             else
             {
@@ -1040,22 +1117,26 @@ internal sealed class ModManagerView : UserControl
 
     private void RefreshList()
     {
+        // 列表要重建了，正在进行的备注行内编辑先收掉（不保存，避免把半截文字存进去）
+        EndNoteEditor(save: false);
+
+        bool showDisabled = _showDisabled.Checked;
+        var filter = _filterField.Box.Text.Trim();
+
+        // 两个视图吃同一份过滤+排序结果
+        var visible = _mods
+            .OrderBy(m => PickTone(m).Rank)
+            .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(m => (showDisabled || m.Enabled) && (filter.Length == 0 || MatchesFilter(m, filter)))
+            .ToList();
+
+        // ---- 列表视图 ----
         _list.BeginUpdate();
         try
         {
-            bool showDisabled = _showDisabled.Checked;
-            var filter = _filterField.Box.Text.Trim();
-
             _list.Items.Clear();
-            foreach (var mod in _mods
-                         .OrderBy(m => PickTone(m).Rank)
-                         .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var mod in visible)
             {
-                if (!showDisabled && !mod.Enabled)
-                    continue;
-                if (filter.Length > 0 && !MatchesFilter(mod, filter))
-                    continue;
-
                 var tone = PickTone(mod).Tone;
                 var item = new ListViewItem(mod.Name)
                 {
@@ -1079,10 +1160,146 @@ internal sealed class ModManagerView : UserControl
             _list.EndUpdate();
         }
 
+        // ---- 网格视图 ----
+        RebuildGrid(visible);
+
         UpdateEmptyHint();
         SyncActionButtons();
         RefreshSummary();
     }
+
+    /// <summary>把过滤后的 mod 列表投到网格；封面异步补。</summary>
+    private void RebuildGrid(List<ModEntry> mods)
+    {
+        if (_grid is null)
+            return;
+
+        var items = mods.Select(m => new ModGridItem
+        {
+            Name = m.Name,
+            Note = _config.GetNote(m.UniqueId),
+            NexusModId = NexusClient.FindNexusModId(m.Manifest?.UpdateKeys),
+            Enabled = m.Enabled,
+            HasUpdate = m.HasUpdate,
+            HasProblem = m.Error is not null || m.IsDuplicateId || m.IsEntryDllMissing || IsBadCompatibility(m),
+            ProblemText = m.Error ?? (m.IsDuplicateId ? "MOD ID 与别的 mod 重复" : null),
+            Version = m.VersionText,
+            LatestVersion = m.HasUpdate ? m.UpdateVersion : null,
+        }).ToList();
+
+        _grid.SetItems(items, (item, _) => RequestCover(item));
+    }
+
+    /// <summary>异步补封面：缓存有就用；没有且配了 key 才发请求，结果回填网格。</summary>
+    private void RequestCover(ModGridItem item)
+    {
+        if (_grid is null)
+            return;
+
+        // 先用缓存里的（有就立刻显示）
+        var cached = item.NexusModId is { } id0 ? CoverCache.GetCached(id0) : null;
+        if (cached is not null)
+        {
+            _grid.SetCover(item, cached);
+            return;
+        }
+
+        // 没缓存：有 Nexus id 且配了 key 才异步拉
+        if (item.NexusModId is not { } modId)
+            return;   // 没有 Nexus 来源，保持占位块
+        if (string.IsNullOrWhiteSpace(_config.NexusApiKey))
+            return;   // 没配 key 拿不到元数据
+
+        if (!_coverRequested.Add(modId))
+            return;   // 已经在拉了
+
+        var grid = _grid;   // 防止重建期间被置空
+        _ = Task.Run(async () =>
+        {
+            bool ok = await CoverCache.EnsureAsync(modId, _config.NexusApiKey, ct: CancellationToken.None);
+            if (!ok)
+                return;
+            var img = CoverCache.GetCached(modId);
+            if (img is not null)
+                BeginInvoke(() => grid.SetCover(item, img));
+        });
+    }
+
+    /// <summary>
+    /// 网格里点了某张卡片的复选框：启用/禁用该 mod。
+    /// 复用列表的 ToggleSelectedAsync 流程（含依赖警告、游戏运行检测），动作完成后的
+    /// RescanSilentAsync 会重刷两个视图，复选框状态自动对齐。
+    /// </summary>
+    private async void OnGridItemCheckedChanged(object? sender, ModGridItem item)
+    {
+        if (_busy)
+        {
+            // 状态立刻回滚（动作被拒绝）
+            var cell = _grid.GetCheckedItems().FirstOrDefault(c => ReferenceEquals(c.Item, item));
+            if (cell.Item is not null)
+            {
+                var revert = item.Enabled;
+                _grid.SetItems(GetVisibleMods().Select(m => new ModGridItem
+                {
+                    Name = m.Name,
+                    Note = _config.GetNote(m.UniqueId),
+                    NexusModId = NexusClient.FindNexusModId(m.Manifest?.UpdateKeys),
+                    Enabled = m.Enabled,
+                    HasUpdate = m.HasUpdate,
+                    HasProblem = m.Error is not null || m.IsDuplicateId || m.IsEntryDllMissing || IsBadCompatibility(m),
+                    ProblemText = m.Error,
+                    Version = m.VersionText,
+                    LatestVersion = m.HasUpdate ? m.UpdateVersion : null,
+                }), (it, _) => RequestCover(it));
+            }
+            return;
+        }
+
+        // 找到对应 ModEntry 并在列表里选中（ToggleSelectedAsync 吃 SelectedEntry）
+        var entry = _mods.FirstOrDefault(m => m.Name == item.Name);
+        if (entry is null)
+            return;
+        if (_list.Items.Count > 0)
+            _list.Items[0].Selected = false;
+        var target = _list.Items.Cast<ListViewItem>().FirstOrDefault(i => ReferenceEquals(i.Tag, entry));
+        if (target is not null)
+        {
+            target.Selected = true;
+            target.Focused = true;
+        }
+
+        await ToggleSelectedAsync();
+    }
+
+    /// <summary>切换列表 / 网格视图。</summary>
+    private void SwitchView(bool gridMode)
+    {
+        if (_gridMode == gridMode)
+            return;
+        _gridMode = gridMode;
+
+        _list.Visible = !gridMode;
+        _grid.Visible = gridMode;
+        _btnListView.Variant = gridMode ? ButtonVariant.Ghost : ButtonVariant.Primary;
+        _btnGridView.Variant = gridMode ? ButtonVariant.Primary : ButtonVariant.Ghost;
+        _btnListView.Invalidate();
+        _btnGridView.Invalidate();
+
+        if (gridMode)
+            RebuildGrid(GetVisibleMods());
+        else
+            _list.Focus();
+    }
+
+    /// <summary>取当前过滤+排序后的列表（给视图切换时重建网格用）。</summary>
+    private List<ModEntry> GetVisibleMods() =>
+        _mods
+            .OrderBy(m => PickTone(m).Rank)
+            .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(m => (_showDisabled.Checked || m.Enabled)
+                        && (_filterField.Box.Text.Trim().Length == 0
+                            || MatchesFilter(m, _filterField.Box.Text.Trim())))
+            .ToList();
 
     /// <summary>列表为空时在卡片中央给一句说明，而不是留一片黑。</summary>
     private void UpdateEmptyHint()
@@ -1092,8 +1309,9 @@ internal sealed class ModManagerView : UserControl
 
         bool empty = _list.Items.Count == 0;
 
-        // 列表和提示框是重叠的：空状态时把列表让开，避免它盖住提示文字。
-        _list.Visible = !empty;
+        // 列表/网格与提示框重叠：空状态时全让开。非空时按当前视图模式显示对应视图。
+        _list.Visible = !empty && !_gridMode;
+        _grid.Visible = !empty && _gridMode;
         _emptyHint.Visible = empty;
 
         if (!empty)
@@ -1242,7 +1460,7 @@ internal sealed class ModManagerView : UserControl
         }
     }
 
-    private void OpenSelectedPage()
+    private async void OpenSelectedPage()
     {
         if (SelectedEntry is not { } entry)
             return;
@@ -1257,8 +1475,13 @@ internal sealed class ModManagerView : UserControl
             return;
         }
 
-        if (!ShellHelper.OpenUrl(url))
-            Msg.Show(this, $"打开浏览器失败。\n\n{url}", "失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        if (!await ShellHelper.OpenUrlAsync(url))
+        {
+            ShellHelper.TryCopyToClipboard(url);
+            Msg.Show(this,
+                $"浏览器没能自动打开。\n\n原因：{ShellHelper.LastError}\n\n链接已复制到剪贴板，可以直接粘贴到浏览器：\n{url}",
+                "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     /// <summary>优先用接口给的地址，否则从 update key 猜（Nexus:123 → nexusmods 的 mod 页）。</summary>
@@ -1341,6 +1564,133 @@ internal sealed class ModManagerView : UserControl
 
         // 只刷这一行的备注列，不重扫
         RefreshList();
+    }
+
+    /*********
+    ** 备注行内编辑（双击备注列）
+    *********/
+    /// <summary>
+    /// 双击列表：点在备注列（最后一列）的横向范围内 → 原地出现输入框直接编辑；
+    /// 点在其他列 → 维持原行为，打开 mod 所在文件夹。
+    /// 判定用「鼠标 X >= 最后一列的 Left」而不是精确的列命中：
+    /// 前几列加起来可能超过客户区宽（要拖滚动条才看到备注列），此时精确命中会算错列。
+    /// </summary>
+    private void OnListMouseDoubleClick(object? sender, MouseEventArgs e)
+    {
+        var hit = _list.HitTest(e.Location);
+        if (hit.Item is null)
+            return;
+
+        var item = hit.Item;
+        int last = _list.Columns.Count - 1;
+        int lastLeft = item.SubItems.Count > last
+            ? item.SubItems[last].Bounds.Left
+            : int.MaxValue;
+
+        if (e.X >= lastLeft)
+        {
+            BeginNoteEdit(item, item.SubItems.Count > last ? item.SubItems[last] : null);
+            return;
+        }
+
+        OpenSelectedFolder();
+    }
+
+    /// <summary>在备注单元格原位放一个输入框；Enter/失焦保存，Esc 取消。</summary>
+    private void BeginNoteEdit(ListViewItem item, ListViewItem.ListViewSubItem? cell)
+    {
+        // 已经在编辑：先结束上一次（会保存）
+        EndNoteEditor(save: true);
+
+        var entry = item.Tag as ModEntry;
+        if (entry?.UniqueId is not { } id)
+        {
+            Msg.Show(this, "这个条目没有 mod ID，无法挂备注。", "提示",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // 备注列可能被挤出可视区（StretchLastColumn 保证最后一列铺满，一般不会）
+        var bounds = cell is not null && cell.Bounds.Width > 0
+            ? cell.Bounds
+            : item.SubItems[^1].Bounds;
+        if (bounds.Width <= 0)
+            return;
+
+        var editor = new TextBox
+        {
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = Theme.SurfaceRaised,
+            ForeColor = Theme.Text,
+            Font = Theme.Ui(9f),
+            MaxLength = 200,
+            Text = _config.GetNote(id) ?? "",
+        };
+
+        _noteEditor = editor;
+        _noteEditItem = item;
+
+        editor.SetBounds(bounds.X, bounds.Y, Math.Max(80, bounds.Width), item.Bounds.Height - 2);
+        _list.Controls.Add(editor);
+        editor.BringToFront();
+        editor.Focus();
+        editor.SelectAll();
+
+        // Enter / 失焦 = 保存并收起；Esc = 放弃
+        editor.KeyDown += (_, ke) =>
+        {
+            if (ke.KeyCode == Keys.Enter)
+            {
+                ke.SuppressKeyPress = true;
+                EndNoteEditor(save: true);
+            }
+            else if (ke.KeyCode == Keys.Escape)
+            {
+                ke.SuppressKeyPress = true;
+                EndNoteEditor(save: false);
+            }
+        };
+        editor.LostFocus += (_, _) => EndNoteEditor(save: true);
+    }
+
+    /// <summary>收起行内编辑框；save=true 时把文本写进配置并刷这一行。</summary>
+    private void EndNoteEditor(bool save)
+    {
+        if (_noteEditor is not { } editor)
+            return;
+
+        var item = _noteEditItem;
+        _noteEditor = null;
+        _noteEditItem = null;
+
+        // 必须先读文本再销毁控件——Dispose 之后 Text 会变成空串
+        var text = editor.Text.Trim();
+
+        _list.Controls.Remove(editor);
+        editor.Dispose();
+
+        if (!save || item?.Tag is not ModEntry entry || entry.UniqueId is not { } id)
+        {
+            _list.Invalidate();
+            return;
+        }
+
+        var old = _config.GetNote(id);
+        if (string.Equals(old, text.Length == 0 ? null : text, StringComparison.Ordinal))
+        {
+            _list.Invalidate();
+            return; // 没改，不动
+        }
+
+        _config.SetNote(id, text);
+        Log(string.IsNullOrWhiteSpace(text)
+            ? $"已清除备注：{entry.Name}"
+            : $"已保存备注：{entry.Name} — {text}");
+
+        // 就地更新单元格文本，不整表重扫（重扫会打断正在浏览的滚动位置）
+        if (item.SubItems.Count >= _list.Columns.Count)
+            item.SubItems[^1].Text = text;
+        _list.Invalidate();
     }
 
     private void SyncActionButtons()

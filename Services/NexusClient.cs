@@ -20,6 +20,15 @@ public sealed record NexusModFile(
     long UploadedTimestamp,
     string? Description);
 
+/// <summary>mods/{id}.json 返回的 mod 元数据（网格视图封面用，只留需要的字段）。</summary>
+public sealed record NexusModInfo(
+    long ModId,
+    string Name,
+    string? Summary,
+    string? Author,
+    string? PictureUrl,
+    int EndorsementCount);
+
 /// <summary>Nexus API 出错（带尽快能说明清楚的中文消息）。</summary>
 public sealed class NexusApiException : Exception
 {
@@ -179,6 +188,27 @@ public sealed class NexusClient
         return await DownloadToAsync(linkUrl, null, link.ModId, link.FileId, destDir, log,
             "这个 nxm 下载授权无效或已过期（Nexus 临时 key 一般只有效几分钟）。请回到 Nexus 网站的文件页重新点一次「Mod Manager Download」。",
             ct);
+    }
+
+    /// <summary>
+    /// 查一个 mod 的元数据（网格视图封面用：picture_url 等）。
+    /// 404 → mod id 写错或已隐藏；403 → 只对会员可见。需要 API key。
+    /// </summary>
+    public async Task<NexusModInfo> GetModInfoAsync(long modId, CancellationToken ct = default)
+    {
+        using var resp = await _http.GetAsync($"{BaseUrl}/mods/{modId}.json", ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            throw new NexusApiException(404, $"Nexus 上找不到 mod {modId}（ID 写错、mod 已隐藏或已被删除）。");
+        resp.EnsureSuccessStatusCode();
+
+        var doc = await ReadJsonAsync(resp, ct);
+        return new NexusModInfo(
+            ModId: doc.TryGetProperty("mod_id", out var mid) && mid.ValueKind == JsonValueKind.Number ? mid.GetInt64() : modId,
+            Name: doc.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+            Summary: doc.TryGetProperty("summary", out var s) ? s.GetString() : null,
+            Author: doc.TryGetProperty("author", out var a) ? a.GetString() : null,
+            PictureUrl: doc.TryGetProperty("picture_url", out var p) ? p.GetString() : null,
+            EndorsementCount: doc.TryGetProperty("endorsement_count", out var ec) && ec.ValueKind == JsonValueKind.Number ? ec.GetInt32() : 0);
     }
 
     /// <summary>查一个具体文件的信息（名字/版本，确认弹窗和日志用）。需要 API key。</summary>
