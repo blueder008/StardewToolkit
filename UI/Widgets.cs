@@ -90,16 +90,31 @@ internal sealed class LogoBadge : Control
     public LogoBadge()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                 | ControlStyles.SupportsTransparentBackColor, true);
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
         Size = new Size(52, 52);
-        BackColor = Color.Transparent;
+    }
+
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        // 徽章外四角铺父级底色（实底重绘，不走透明合成）
+        for (Control? parent = Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent.BackColor.A == 255)
+            {
+                BackColor = parent.BackColor;
+                return;
+            }
+        }
+        BackColor = Theme.Bg;
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var bg = new SolidBrush(BackColor.A == 255 ? BackColor : Theme.Bg))
+            g.FillRectangle(bg, ClientRectangle);
         var rect = new Rectangle(1, 1, Width - 3, Height - 3);
         using (var path = Theme.RoundedRect(rect, CornerRadius))
         {
@@ -124,6 +139,9 @@ internal sealed class Pill : Control
 {
     private Color _pillColor = Theme.Accent;
 
+    /// <summary>父级底色（透明合成的残影根源，改为实底重绘）。</summary>
+    private Color _backdrop = Theme.Bg;
+
     public Color PillColor
     {
         get => _pillColor;
@@ -133,14 +151,31 @@ internal sealed class Pill : Control
     public Pill(string text, Color? color = null)
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
         Text = text;
         if (color is { } c)
             _pillColor = c;
         Font = Theme.Ui(8.5f);
-        BackColor = Color.Transparent;
+        BackColor = Theme.Bg;   // 先给个实底；挂到父级后 OnParentChanged 会换成真实父级底色
         Height = 24;
         UpdateWidth();
+    }
+
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        _backdrop = ResolveBackdrop();
+        BackColor = _backdrop;   // 实底，不再走透明合成
+    }
+
+    private Color ResolveBackdrop()
+    {
+        for (Control? parent = Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent.BackColor.A == 255)
+                return parent.BackColor;
+        }
+        return Theme.Bg;
     }
 
     protected override void OnTextChanged(EventArgs e)
@@ -160,8 +195,9 @@ internal sealed class Pill : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-        Theme.FillRounded(g, rect, Height / 2, Theme.Blend(Theme.Bg, _pillColor, 0.18));
-        using (var pen = new Pen(Theme.Blend(Theme.Bg, _pillColor, 0.45)))
+        Theme.DrawRounded(g, rect, Height / 2, _backdrop, Color.Transparent);   // 先铺父级底色盖掉圆角外区域
+        Theme.FillRounded(g, rect, Height / 2, Theme.Blend(_backdrop, _pillColor, 0.18));
+        using (var pen = new Pen(Theme.Blend(_backdrop, _pillColor, 0.45)))
         using (var path = Theme.RoundedRect(rect, Height / 2))
             g.DrawPath(pen, path);
         TextRenderer.DrawText(g, Text, Font, rect, _pillColor,
@@ -265,15 +301,27 @@ internal sealed class ModernButton : Button
         return Theme.Bg;
     }
 
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        // 圆角外四角必须铺父级底色；父级换了底色也要跟着换（残影根源）
+        BackColor = Backdrop();
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
+        var backdrop = BackColor.A == 255 ? BackColor : Backdrop();
+        // 先整块铺父级底色，圆角外才不会留下上一帧/系统痕迹
+        using (var bg = new SolidBrush(backdrop))
+            g.FillRectangle(bg, ClientRectangle);
+
         Color fill, stroke, text;
         if (!Enabled)
         {
-            fill = Variant == ButtonVariant.Ghost ? Backdrop() : Theme.Blend(Theme.Bg, Theme.SurfaceRaised, 0.55);
+            fill = Variant == ButtonVariant.Ghost ? backdrop : Theme.Blend(Theme.Bg, Theme.SurfaceRaised, 0.55);
             stroke = Theme.Border;
             text = Theme.TextDim;
         }
@@ -296,7 +344,7 @@ internal sealed class ModernButton : Button
                     break;
 
                 case ButtonVariant.Ghost:
-                    fill = _pressed ? Theme.SurfaceHover : _hover ? Theme.SurfaceRaised : Backdrop();
+                    fill = _pressed ? Theme.SurfaceHover : _hover ? Theme.SurfaceRaised : backdrop;
                     stroke = Color.Transparent;
                     text = _hover ? Theme.Text : Theme.TextMuted;
                     break;
@@ -399,6 +447,17 @@ internal sealed class TextField : Panel
         Click += (_, _) => Box.Focus();
     }
 
+    /// <summary>父级底色（圆角外四角区域要铺它）。</summary>
+    private Color Backdrop()
+    {
+        for (Control? parent = Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent.BackColor.A == 255)
+                return parent.BackColor;
+        }
+        return Theme.Bg;
+    }
+
     private int LeadingWidth => string.IsNullOrEmpty(_leadingGlyph) ? 0 : 28;
 
     private void LayoutBox()
@@ -419,7 +478,9 @@ internal sealed class TextField : Panel
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(BackColor);
+        // 整块铺父级底色（圆角外四角不再有脏点），再画圆角输入框
+        using (var bg = new SolidBrush(Backdrop()))
+            g.FillRectangle(bg, ClientRectangle);
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
         Theme.DrawRounded(g, rect, 8, Theme.SurfaceRaised,
             _focused ? Theme.Accent : Theme.Border);
@@ -448,11 +509,11 @@ internal sealed class ModernCheckBox : Control
     private bool _hover;
     private bool _checked;
 
-    /// <summary>勾选状态变化时触发。</summary>
-    public new event EventHandler? CheckedChanged;
+    /// <summary>勾选状态变化时触发（Control.Checked 只在 Control 体系里，这里用 new 遮蔽以接住事件链）。</summary>
+    public event EventHandler? CheckedChanged;
 
     [System.ComponentModel.DefaultValue(false)]
-    public new bool Checked
+    public bool Checked
     {
         get => _checked;
         set
@@ -469,14 +530,27 @@ internal sealed class ModernCheckBox : Control
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                  | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                 | ControlStyles.SupportsTransparentBackColor
                  | ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, true);
         AutoSize = true;     // FlowLayoutPanel 里按 GetPreferredSize 取宽
         Font = Theme.Ui(9f);
         ForeColor = Theme.TextMuted;
         Cursor = Cursors.Hand;
-        BackColor = Color.Transparent;
         Height = 24;
+    }
+
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        // 不走透明合成（重影根源）：挂到父级后用父级实底自绘
+        for (Control? parent = Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent.BackColor.A == 255)
+            {
+                BackColor = parent.BackColor;
+                return;
+            }
+        }
+        BackColor = Theme.Bg;
     }
 
     public override Size GetPreferredSize(Size proposedSize)
@@ -512,6 +586,10 @@ internal sealed class ModernCheckBox : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // 实底重绘：控件底色整块铺一遍（父级底色已在 OnParentChanged 赋好）
+        using (var bg = new SolidBrush(BackColor.A == 255 ? BackColor : Theme.Bg))
+            g.FillRectangle(bg, ClientRectangle);
 
         var box = new Rectangle(1, (Height - 16) / 2, 16, 16);
         if (Checked)
@@ -559,9 +637,8 @@ internal sealed class StatusList : Control
     public StatusList()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                 | ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        BackColor = Theme.Surface;   // 所在卡片底色；实底不走透明合成
         Font = Theme.Ui(9f);
         Height = RowHeight;
     }
@@ -580,6 +657,8 @@ internal sealed class StatusList : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var bg = new SolidBrush(BackColor.A == 255 ? BackColor : Theme.Surface))
+            g.FillRectangle(bg, ClientRectangle);
         using var labelFont = Theme.Ui(8.5f);
         using var valueFont = Theme.Ui(9f);
 
@@ -619,9 +698,8 @@ internal sealed class EmptyHint : Control
     public EmptyHint()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                 | ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        BackColor = Theme.Surface;
         Font = Theme.Ui(9f);
     }
 
@@ -629,7 +707,10 @@ internal sealed class EmptyHint : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        TextRenderer.DrawText(e.Graphics, Hint, Font, ClientRectangle,
+        var g = e.Graphics;
+        using (var bg = new SolidBrush(BackColor.A == 255 ? BackColor : Theme.Surface))
+            g.FillRectangle(bg, ClientRectangle);
+        TextRenderer.DrawText(g, Hint, Font, ClientRectangle,
             Theme.TextDim,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
     }

@@ -11,8 +11,11 @@ public static class NxmPipe
 {
     public const string PipeName = "StardewToolkit-nxm";
 
-    /// <summary>主实例开始监听；收到链接回调一次。永远循环，进程退出时随之结束。</summary>
-    public static void StartListening(Action<string> onLink) => _ = Task.Run(async () =>
+    /// <summary>第二实例要求主实例把自己的窗口弹到前台的约定消息（不是 nxm 链接）。</summary>
+    public const string ActivateMessage = "\x01ACTIVATE";
+
+    /// <summary>主实例开始监听；收到链接回调一次；收到激活请求回调一次。永远循环，进程退出时随之结束。</summary>
+    public static void StartListening(Action<string> onLink, Action? onActivate = null) => _ = Task.Run(async () =>
     {
         while (true)
         {
@@ -26,7 +29,14 @@ public static class NxmPipe
                 var line = await reader.ReadLineAsync();
                 if (!string.IsNullOrWhiteSpace(line))
                 {
-                    try { onLink(line.Trim()); }
+                    var msg = line.Trim();
+                    try
+                    {
+                        if (msg == ActivateMessage)
+                            onActivate?.Invoke();
+                        else
+                            onLink(msg);
+                    }
                     catch { /* 回调里出错别拖垮管道监听线程 */ }
                 }
             }

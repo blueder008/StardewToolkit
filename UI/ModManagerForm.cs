@@ -328,6 +328,7 @@ internal sealed class ModManagerForm : Form
         var menu = new ContextMenuStrip();
         Theme.StyleMenu(menu);
         menu.Items.Add("禁用 / 启用", null, async (_, _) => await ToggleSelectedAsync());
+        menu.Items.Add("处理缺失的依赖…", null, async (_, _) => await ShowMissingDependenciesForSelectedAsync());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("打开所在文件夹", null, (_, _) => OpenSelectedFolder());
         menu.Items.Add("打开更新页面", null, (_, _) => OpenSelectedPage());
@@ -824,7 +825,21 @@ internal sealed class ModManagerForm : Form
         }
 
         var workspace = Path.Combine(SmapiInstallerRunner.WorkspaceDirPath, "mod-updates");
-        var zipPath = await _gitHub.DownloadAsync(release, workspace, Log);
+        string zipPath;
+        try
+        {
+            zipPath = await _gitHub.DownloadAsync(release, workspace, Log);
+        }
+        catch (Exception ex)
+        {
+            // GitHub 直连下载失败 → 换镜像前缀重试（SMAPI 安装器同款兜底链），
+            // 镜像也全挂才放弃，提示走「更新页面」手动下载。
+            Log($"⚠ GitHub 直连下载失败：{ex.Message}，尝试镜像…");
+            zipPath = await DownloadFromMirrorsAsync(release, workspace)
+                      ?? throw new InvalidOperationException(
+                          "GitHub 与全部镜像都下载失败，请点「更新页面」手动下载 zip，再「安装 zip…」导入。");
+        }
+
         var report = await ModPackageInstaller.InstallFromZipAsync(zipPath, ModsDir, Log);
         if (report.Success)
             Log($"✅ {entry.Name}: {report.Primary.OldVersion ?? "首次安装"} → {report.Primary.NewVersion}");
@@ -833,6 +848,33 @@ internal sealed class ModManagerForm : Form
                 "更新失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
         await RescanSilentAsync();
+    }
+
+    /// <summary>
+    /// GitHub mod 包的镜像兜底下载：直连失败后按 gh-proxy / ghfast / ghproxy 镜像逐个重试。
+    /// 全部失败返回 null（mod 包没有官方哈希可校验，只信任 GitHub 域名与这几家镜像）。
+    /// </summary>
+    private static readonly string[] GitHubMirrorPrefixes =
+    [
+        "https://gh-proxy.com/",
+        "https://ghfast.top/",
+        "https://ghproxy.net/",
+    ];
+
+    private async Task<string?> DownloadFromMirrorsAsync(GitHubModRelease release, string destDir)
+    {
+        foreach (var prefix in GitHubMirrorPrefixes)
+        {
+            try
+            {
+                return await _gitHub.DownloadAsync(release, destDir, Log, ct: default, mirrorPrefix: prefix);
+            }
+            catch (Exception ex)
+            {
+                Log($"  ✗ 镜像 {new Uri(prefix).Host} 失败：{ex.Message}");
+            }
+        }
+        return null;
     }
 
     /// <summary>Nexus 更新键分支：查最新主文件 → 版本确认 → 下载安装（Premium）；403 时转浏览器手动兜底。</summary>
@@ -895,12 +937,16 @@ internal sealed class ModManagerForm : Form
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
             if (manual == DialogResult.OK)
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                var pageUrl = $"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}";
+                if (await ShellHelper.OpenUrlAsync(pageUrl, Log))
                 {
-                    FileName = $"https://www.nexusmods.com/stardewvalley/mods/{modId}?tab=files&file_id={file.FileId}",
-                    UseShellExecute = true,
-                });
-                Log("官方文件页已打开。浏览器下载 zip 后，点「安装 zip…」选择它完成更新。");
+                    Log("官方文件页已打开。浏览器下载 zip 后，点「安装 zip…」选择它完成更新。");
+                }
+                else
+                {
+                    ShellHelper.TryCopyToClipboard(pageUrl);
+                    Log($"⚠ 浏览器没能打开（{ShellHelper.LastError}），链接已复制到剪贴板，可手动粘贴访问。");
+                }
             }
             else
             {
@@ -998,7 +1044,7 @@ internal sealed class ModManagerForm : Form
         mod.Update?.CompatibilityStatus is "Broken" or "Obsolete";
 
     /// <summary>状态列文本。</summary>
-    private static string DescribeStatus(ModEntry mod)
+    private string DescribeStatus(ModEntry mod)
     {
         var notes = new List<string>();
 
@@ -1032,8 +1078,8 @@ internal sealed class ModManagerForm : Form
 
         if (mod.IsDuplicateId)
             notes.Add("重复 MOD ID（另一个同名 mod 的副本也在，只会加载一个）");
-        if (mod.MissingDependencies is { Length: > 0 } missing)
-            notes.Add($"缺少依赖：{missing}");
+        if (mod.MissingDependencies is { Length: > 0 })
+            notes.Add(DescribeMissingDependencies(mod));
         if (mod.IsEntryDllMissing)
             notes.Add("入口 DLL 文件不存在（装漏了或重名打包了）");
 
@@ -1042,6 +1088,168 @@ internal sealed class ModManagerForm : Form
             notes.Add(mod.Type == ModEntryType.ContentPack ? "内容包" : "正常");
 
         return string.Join("；", notes);
+    }
+
+    /*********
+    ** 依赖状态分析（与 ModManagerView 同款）
+    *********/
+    private sealed record DependencyStatus(string Id, bool InstalledButDisabled, string? DisabledName, bool KnownOffline);
+
+    private DependencyStatus DescribeDependency(string depId)
+    {
+        var disabled = _mods.FirstOrDefault(m =>
+            string.Equals(m.UniqueId, depId, StringComparison.OrdinalIgnoreCase) && !m.Enabled && !m.IsBroken);
+        if (disabled is not null)
+            return new DependencyStatus(depId, InstalledButDisabled: true, DisabledName: disabled.Name, KnownOffline: false);
+
+        if (_updateMap.TryGetValue(depId, out var data) && !string.IsNullOrWhiteSpace(data.SuggestedUrl))
+            return new DependencyStatus(depId, InstalledButDisabled: false, DisabledName: null, KnownOffline: true);
+
+        return new DependencyStatus(depId, InstalledButDisabled: false, DisabledName: null, KnownOffline: false);
+    }
+
+    private string DescribeMissingDependencies(ModEntry mod)
+    {
+        if (mod.MissingDependencies is not { Length: > 0 } missing)
+            return "";
+
+        var parts = missing
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(depId =>
+            {
+                var status = DescribeDependency(depId);
+                if (status.InstalledButDisabled)
+                    return $"{depId}（已装但被禁用，启用它即可）";
+                if (status.KnownOffline)
+                    return $"{depId}（未安装，可在官方页面下载）";
+                return $"{depId}（未安装）";
+            });
+
+        return "缺少依赖：" + string.Join("，", parts);
+    }
+
+    private async Task ShowMissingDependenciesForSelectedAsync()
+    {
+        if (SelectedEntry is not { } entry)
+            return;
+
+        if (string.IsNullOrEmpty(entry.MissingDependencies))
+        {
+            Msg.Show(this,
+                "这个 mod 没有缺失的依赖。\n\n依赖检查基于 manifest.json 的 Dependencies 字段，\n" +
+                "以及内容包对框架（ContentPackFor）的要求。",
+                "没有缺失依赖", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        await ShowMissingDependenciesAsync(entry);
+    }
+
+    private async Task ShowMissingDependenciesAsync(ModEntry entry)
+    {
+        if (entry.MissingDependencies is not { Length: > 0 } missing)
+            return;
+
+        var depIds = missing
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+        var lines = new List<string> { $"「{entry.Name}」缺少必需依赖，SMAPI 不会加载它：", "" };
+        var actions = new List<(string DepId, DependencyStatus Status)>();
+
+        for (int i = 0; i < depIds.Count; i++)
+        {
+            var depId = depIds[i];
+            var status = DescribeDependency(depId);
+            actions.Add((depId, status));
+
+            var no = $"  {i + 1}. ";
+            if (status.InstalledButDisabled)
+                lines.Add($"{no}{depId} — 已装但被禁用（{status.DisabledName}），启用它即可");
+            else if (status.KnownOffline)
+                lines.Add($"{no}{depId} — 未安装，去官方页面下载");
+            else
+                lines.Add($"{no}{depId} — 未安装（本工具没有它的来源信息，可到 smapi.io 搜索这个 ID）");
+        }
+
+        lines.Add("");
+        lines.Add("选择处理方式：");
+        for (int i = 0; i < actions.Count; i++)
+        {
+            var status = actions[i].Status;
+            if (status.InstalledButDisabled)
+                lines.Add($"  输入 {i + 1} = 启用被禁用的依赖");
+            else if (status.KnownOffline)
+                lines.Add($"  输入 {i + 1} = 打开它的官方下载页");
+            else
+                lines.Add($"  输入 {i + 1} = 到 smapi.io 搜索 {actions[i].DepId}");
+        }
+        lines.Add("  直接确定 = 什么都不做");
+
+        using var picker = new DependencyActionDialog(lines.ToArray(), actions.Count);
+        if (picker.ShowDialog(this) != DialogResult.OK || picker.ChosenIndex < 0)
+            return;
+
+        var chosen = actions[picker.ChosenIndex];
+        await HandleDependencyActionAsync(chosen.DepId, chosen.Status);
+    }
+
+    private async Task HandleDependencyActionAsync(string depId, DependencyStatus status)
+    {
+        if (status.InstalledButDisabled)
+        {
+            var disabled = _mods.FirstOrDefault(m =>
+                string.Equals(m.UniqueId, depId, StringComparison.OrdinalIgnoreCase) && !m.Enabled && !m.IsBroken);
+            if (disabled is null)
+                return;
+
+            if (GameInspector.IsGameRunning())
+            {
+                Msg.Show(this, "游戏或 SMAPI 正在运行，请先完全退出再启停 Mod。", "游戏运行中",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _busy = true;
+            SetBusy(true);
+            try
+            {
+                var target = ModFolderMover.Enable(disabled);
+                Log($"✅ 已启用依赖 {disabled.Name}：{target}");
+                await RescanSilentAsync();
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ 启用失败：{ex.Message}");
+                Msg.Show(this, ex.Message, "操作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _busy = false;
+                SetBusy(false);
+            }
+            return;
+        }
+
+        string url;
+        if (status.KnownOffline && _updateMap.TryGetValue(depId, out var data) && data.SuggestedUrl is { } suggested)
+        {
+            url = suggested;
+        }
+        else
+        {
+            url = "https://smapi.io/mods?search=" + Uri.EscapeDataString(depId);
+        }
+
+        if (await ShellHelper.OpenUrlAsync(url))
+        {
+            Log($"已打开依赖 {depId} 的下载页：{url}");
+        }
+        else
+        {
+            ShellHelper.TryCopyToClipboard(url);
+            Log($"⚠ 浏览器没能打开，链接已复制到剪贴板：{url}");
+        }
     }
 
     private static string? FirstLine(string? text)
@@ -1100,7 +1308,7 @@ internal sealed class ModManagerForm : Form
         }
     }
 
-    private void OpenSelectedPage()
+    private async void OpenSelectedPage()
     {
         if (SelectedEntry is not { } entry)
             return;
@@ -1115,17 +1323,12 @@ internal sealed class ModManagerForm : Form
             return;
         }
 
-        try
+        if (!await ShellHelper.OpenUrlAsync(url))
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Msg.Show(this, $"打开浏览器失败：{ex.Message}\n\n{url}", "失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShellHelper.TryCopyToClipboard(url);
+            Msg.Show(this,
+                $"浏览器没能自动打开。\n\n原因：{ShellHelper.LastError}\n\n链接已复制到剪贴板，可以直接粘贴到浏览器：\n{url}",
+                "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 

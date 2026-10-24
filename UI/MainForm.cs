@@ -54,7 +54,9 @@ internal sealed class MainForm : Form
     {
         _pendingNxm = pendingNxm;
         Theme.StyleForm(this);
-        Text = "星露谷工具箱 · SMAPI 与 Mod 管理";
+        Text = "星露谷工具箱 · SMAPI 与 Mod 管理（构建 " +
+               System.IO.File.GetLastWriteTime(
+                   System.AppContext.BaseDirectory + "StardewToolkit.dll").ToString("HH:mm") + "）";
         // 与预览稿一致的窗口尺寸：客户区 1262×753，够放 8 列表格
         MinimumSize = new Size(1040, 680);
         Size = new Size(1280, 800);
@@ -63,11 +65,26 @@ internal sealed class MainForm : Form
         BuildUi();
         Shown += async (_, _) =>
         {
-            NxmPipe.StartListening(raw =>
-            {
-                if (NxmLink.Parse(raw) is { } parsed)
-                    AcceptNxmLink(parsed);
-            });
+            NxmPipe.StartListening(
+                raw =>
+                {
+                    if (NxmLink.Parse(raw) is { } parsed)
+                        AcceptNxmLink(parsed);
+                },
+                onActivate: () =>
+                {
+                    // 第二个实例被双击时请求亮出主窗口
+                    void BringUp()
+                    {
+                        if (WindowState == FormWindowState.Minimized)
+                            WindowState = FormWindowState.Normal;
+                        Activate();
+                    }
+                    if (InvokeRequired)
+                        BeginInvoke(BringUp);
+                    else
+                        BringUp();
+                });
             if (_pendingNxm is { } link)
                 AcceptNxmLink(link);
             await StartupAsync();
@@ -916,13 +933,25 @@ internal sealed class MainForm : Form
     {
         log($"打开 Nexus 文件页：{SmapiNexusPageUrl}");
 
-        var opened = ShellHelper.OpenUrl(SmapiNexusPageUrl + "?tab=files");
-        if (!opened)
-            log($"⚠ 自动打开浏览器失败，请手动访问上面的地址。");
+        var pageUrl = SmapiNexusPageUrl + "?tab=files";
+        var opened = await ShellHelper.OpenUrlAsync(pageUrl, log);
+        if (opened)
+        {
+            log("Nexus 文件页已打开。");
+        }
+        else
+        {
+            // 浏览器拉不起来也不要卡死流程：链接进剪贴板，用户可以自己粘贴
+            var copied = ShellHelper.TryCopyToClipboard(pageUrl);
+            log($"⚠ 浏览器没能自动打开：{ShellHelper.LastError}" +
+                (copied ? "（链接已复制到剪贴板，可粘贴到浏览器）" : ""));
+        }
 
         var choice = Msg.Show(this,
             "GitHub 下载全部失败，已切换到 Nexus 官方页面。\n\n" +
-            "已为你打开浏览器：\n" +
+            (opened
+                ? "已为你打开浏览器：\n"
+                : "浏览器没能自动打开，链接已复制到剪贴板，粘贴到浏览器即可：\n") +
             $"    {SmapiNexusPageUrl}\n\n" +
             "在 Nexus 页面点「MOD FILES → Manual Download」（免费账号也可下载），\n" +
             "下载完成后回到这里选择 zip 文件，程序会校验后自动安装。\n\n" +

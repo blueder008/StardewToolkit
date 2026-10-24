@@ -97,17 +97,25 @@ public sealed class GitHubModUpdateService
         return new GitHubModRelease(tagName, pick.Name, pick.Url, pick.Size);
     }
 
-    /// <summary>下载 release zip 到本地目录，返回完整路径。</summary>
+    /// <summary>
+    /// 下载 release zip 到本地目录，返回完整路径。
+    /// mirrorPrefix 传镜像前缀（如 https://gh-proxy.com/）时走该镜像下载；
+    /// 留空走 GitHub 直连。
+    /// </summary>
     public async Task<string> DownloadAsync(
-        GitHubModRelease release, string destDir, Action<string>? log = null, CancellationToken ct = default)
+        GitHubModRelease release, string destDir, Action<string>? log = null,
+        CancellationToken ct = default, string? mirrorPrefix = null)
     {
+        var url = string.IsNullOrEmpty(mirrorPrefix) ? release.AssetUrl : mirrorPrefix + release.AssetUrl;
+        var mirrorLabel = string.IsNullOrEmpty(mirrorPrefix) ? "GitHub 直连" : new Uri(mirrorPrefix).Host;
+
         Directory.CreateDirectory(destDir);
         var dest = Path.Combine(destDir, release.AssetName);
         for (int i = 2; File.Exists(dest); i++)
             dest = Path.Combine(destDir, $"{Path.GetFileNameWithoutExtension(release.AssetName)} ({i}).zip");
 
-        log?.Invoke("下载安装包…");
-        using var resp = await _http.GetAsync(release.AssetUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        log?.Invoke($"下载安装包（{mirrorLabel}）…");
+        using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
         await using var file = File.Create(dest);

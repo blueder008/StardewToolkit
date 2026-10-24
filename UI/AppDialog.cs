@@ -272,15 +272,18 @@ internal sealed class DialogIconBadge : Control
     {
         _icon = icon;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
-                 | ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
+                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        BackColor = Theme.Bg;   // 实底（窗体底色），不走透明合成
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // 实底铺满（父窗体底色），圆外区域不再留系统痕迹
+        using (var bg = new SolidBrush(Theme.Bg))
+            g.FillRectangle(bg, ClientRectangle);
 
         Color tint;
         string glyph;

@@ -229,6 +229,7 @@ internal sealed class ModManagerView : UserControl
         _list.MouseDown += OnListMouseDown;
         _list.MouseUp += OnListMouseUp;
         _list.Resize += (_, _) => StretchLastColumn();
+        _list.LastColumnStretchChanged += StretchLastColumn;
         _list.HandleCreated += (_, _) => StretchLastColumn();
         BuildContextMenu();
 
@@ -403,6 +404,9 @@ internal sealed class ModManagerView : UserControl
     /// 让「状态」列（索引 3）吃掉剩余宽度，避免列表右侧出现系统默认的白色空档。
     /// 不再拉伸备注列：备注列必须始终完整可见（固定 140px），
     /// 否则它会被挤出可视区，双击编辑就点不到了（这次的教训）。
+    ///
+    /// 只在「列总宽不足」时补位；用户拖宽出横向滚动（总宽超出可视区）时不动，
+    /// 否则会把备注列挤出屏幕、取消用户的横向滚动位置。
     /// </summary>
     private void StretchLastColumn()
     {
@@ -416,8 +420,12 @@ internal sealed class ModManagerView : UserControl
             others += _list.Columns[i].Width;
         }
         int stretch = _list.ClientSize.Width - others;
-        if (stretch >= 100)
-            _list.Columns[3].Width = stretch;
+
+        // 已经出现横向滚动（总宽超出可视区）→ 尊重用户布局，不补位
+        if (stretch < 60)
+            return;
+
+        _list.Columns[3].Width = stretch;
     }
 
     /// <summary>点第一列左侧的勾选框区域 = 切换该 mod 的启用状态。</summary>
@@ -466,6 +474,7 @@ internal sealed class ModManagerView : UserControl
         var menu = new ContextMenuStrip();
         Theme.StyleMenu(menu);
         menu.Items.Add("禁用 / 启用", null, async (_, _) => await ToggleSelectedAsync());
+        menu.Items.Add("处理缺失的依赖…", null, async (_, _) => await ShowMissingDependenciesForSelectedAsync());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("打开所在文件夹", null, (_, _) => OpenSelectedFolder());
         menu.Items.Add("打开更新页面", null, (_, _) => OpenSelectedPage());
@@ -475,6 +484,24 @@ internal sealed class ModManagerView : UserControl
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("删除…", null, async (_, _) => await DeleteSelectedAsync());
         _list.ContextMenuStrip = menu;
+    }
+
+    /// <summary>右键菜单入口：选中项缺依赖时弹处理窗，否则提示。</summary>
+    private async Task ShowMissingDependenciesForSelectedAsync()
+    {
+        if (SelectedEntry is not { } entry)
+            return;
+
+        if (string.IsNullOrEmpty(entry.MissingDependencies))
+        {
+            Msg.Show(this,
+                "这个 mod 没有缺失的依赖。\n\n依赖检查基于 manifest.json 的 Dependencies 字段，\n" +
+                "以及内容包对框架（ContentPackFor）的要求。",
+                "没有缺失依赖", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        await ShowMissingDependenciesAsync(entry);
     }
 
     /*********
@@ -680,6 +707,167 @@ internal sealed class ModManagerView : UserControl
             .Where(d => d.IsRequired)
             .Any(d => string.Equals(d.UniqueID, id, StringComparison.OrdinalIgnoreCase))
             || string.Equals(mod.Manifest?.ContentPackFor?.UniqueID, id, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /*********
+    ** 依赖状态分析
+    *********/
+    /// <summary>一个缺失依赖 ID 的具体处境。</summary>
+    private sealed record DependencyStatus(string Id, bool InstalledButDisabled, string? DisabledName, bool KnownOffline);
+
+    /// <summary>
+    /// 判断一个依赖 ID 的处境：
+    ///   - InstalledButDisabled：mod 其实装了，只是被禁用（在 .disabled 区里）→ 启用即可；
+    ///   - KnownOffline：smapi.io 官方元数据里查得到（更新检查跑过）→ 有明确的官方页面可去；
+    ///   - 都不是 → 完全没装，只能靠 ID 搜索。
+    /// </summary>
+    private DependencyStatus DescribeDependency(string depId)
+    {
+        // 装了但被禁用？（禁用的 mod 也在 _mods 列表里，Enabled=false）
+        var disabled = _mods.FirstOrDefault(m =>
+            string.Equals(m.UniqueId, depId, StringComparison.OrdinalIgnoreCase) && !m.Enabled && !m.IsBroken);
+        if (disabled is not null)
+            return new DependencyStatus(depId, InstalledButDisabled: true, DisabledName: disabled.Name, KnownOffline: false);
+
+        // 更新检查元数据里能查到 → 有官方页面
+        if (_updateMap.TryGetValue(depId, out var data) && !string.IsNullOrWhiteSpace(data.SuggestedUrl))
+            return new DependencyStatus(depId, InstalledButDisabled: false, DisabledName: null, KnownOffline: true);
+
+        return new DependencyStatus(depId, InstalledButDisabled: false, DisabledName: null, KnownOffline: false);
+    }
+
+    /// <summary>把「缺少依赖：A, B」渲染成带处境说明的完整句子。</summary>
+    private string DescribeMissingDependencies(ModEntry mod)
+    {
+        if (mod.MissingDependencies is not { Length: > 0 } missing)
+            return "";
+
+        var parts = missing
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(depId =>
+            {
+                var status = DescribeDependency(depId);
+                if (status.InstalledButDisabled)
+                    return $"{depId}（已装但被禁用，启用它即可）";
+                if (status.KnownOffline)
+                    return $"{depId}（未安装，可在官方页面下载）";
+                return $"{depId}（未安装）";
+            });
+
+        return "缺少依赖：" + string.Join("，", parts);
+    }
+
+    /// <summary>
+    /// 弹出「缺少依赖」详情窗口：逐条说明每个缺失依赖的处境，
+    /// 被禁用的直接给出「一键启用」；没装的且有官方页面给「打开下载页」；都没有给 smapi.io 搜索。
+    /// </summary>
+    private async Task ShowMissingDependenciesAsync(ModEntry entry)
+    {
+        if (entry.MissingDependencies is not { Length: > 0 } missing)
+            return;
+
+        var depIds = missing
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+        var lines = new List<string> { $"「{entry.Name}」缺少必需依赖，SMAPI 不会加载它：", "" };
+        var actions = new List<(string DepId, DependencyStatus Status)>();
+
+        for (int i = 0; i < depIds.Count; i++)
+        {
+            var depId = depIds[i];
+            var status = DescribeDependency(depId);
+            actions.Add((depId, status));
+
+            var no = $"  {i + 1}. ";
+            if (status.InstalledButDisabled)
+                lines.Add($"{no}{depId} — 已装但被禁用（{status.DisabledName}），启用它即可");
+            else if (status.KnownOffline)
+                lines.Add($"{no}{depId} — 未安装，去官方页面下载");
+            else
+                lines.Add($"{no}{depId} — 未安装（本工具没有它的来源信息，可到 smapi.io 搜索这个 ID）");
+        }
+
+        lines.Add("");
+        lines.Add("选择处理方式：");
+        for (int i = 0; i < actions.Count; i++)
+        {
+            var status = actions[i].Status;
+            if (status.InstalledButDisabled)
+                lines.Add($"  输入 {i + 1} = 启用被禁用的依赖");
+            else if (status.KnownOffline)
+                lines.Add($"  输入 {i + 1} = 打开它的官方下载页");
+            else
+                lines.Add($"  输入 {i + 1} = 到 smapi.io 搜索 {actions[i].DepId}");
+        }
+        lines.Add("  直接确定 = 什么都不做");
+
+        using var picker = new DependencyActionDialog(lines.ToArray(), actions.Count);
+        if (picker.ShowDialog(FindForm()) != DialogResult.OK || picker.ChosenIndex < 0)
+            return;
+
+        var chosen = actions[picker.ChosenIndex];
+        await HandleDependencyActionAsync(chosen.DepId, chosen.Status);
+    }
+
+    /// <summary>执行某个缺失依赖的处理动作（启用被禁用的 / 打开下载页 / smapi.io 搜索）。</summary>
+    private async Task HandleDependencyActionAsync(string depId, DependencyStatus status)
+    {
+        if (status.InstalledButDisabled)
+        {
+            // 启用那个被禁用的依赖
+            var disabled = _mods.FirstOrDefault(m =>
+                string.Equals(m.UniqueId, depId, StringComparison.OrdinalIgnoreCase) && !m.Enabled && !m.IsBroken);
+            if (disabled is null)
+                return;
+
+            if (GameInspector.IsGameRunning())
+            {
+                Msg.Show(this, "游戏或 SMAPI 正在运行，请先完全退出再启停 Mod。", "游戏运行中",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _busy = true;
+            SetBusy(true);
+            try
+            {
+                var target = ModFolderMover.Enable(disabled);
+                Log($"✅ 已启用依赖 {disabled.Name}：{target}");
+                await RescanSilentAsync();
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ 启用失败：{ex.Message}");
+                Msg.Show(this, ex.Message, "操作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _busy = false;
+                SetBusy(false);
+            }
+            return;
+        }
+
+        string url;
+        if (status.KnownOffline && _updateMap.TryGetValue(depId, out var data) && data.SuggestedUrl is { } suggested)
+        {
+            url = suggested;
+        }
+        else
+        {
+            url = "https://smapi.io/mods?search=" + Uri.EscapeDataString(depId);
+        }
+
+        if (await ShellHelper.OpenUrlAsync(url))
+        {
+            Log($"已打开依赖 {depId} 的下载页：{url}");
+        }
+        else
+        {
+            ShellHelper.TryCopyToClipboard(url);
+            Log($"⚠ 浏览器没能打开，链接已复制到剪贴板：{url}");
+        }
     }
 
     private async Task DeleteSelectedAsync()
@@ -1181,8 +1369,10 @@ internal sealed class ModManagerView : UserControl
             NexusModId = NexusClient.FindNexusModId(m.Manifest?.UpdateKeys),
             Enabled = m.Enabled,
             HasUpdate = m.HasUpdate,
-            HasProblem = m.Error is not null || m.IsDuplicateId || m.IsEntryDllMissing || IsBadCompatibility(m),
-            ProblemText = m.Error ?? (m.IsDuplicateId ? "MOD ID 与别的 mod 重复" : null),
+            HasProblem = m.Error is not null || m.IsDuplicateId || m.IsEntryDllMissing || IsBadCompatibility(m) || !string.IsNullOrEmpty(m.MissingDependencies),
+            ProblemText = m.Error
+                ?? (string.IsNullOrEmpty(m.MissingDependencies) ? null : DescribeMissingDependencies(m))
+                ?? (m.IsDuplicateId ? "MOD ID 与别的 mod 重复" : null),
             Version = m.VersionText,
             LatestVersion = m.HasUpdate ? m.UpdateVersion : null,
         }).ToList();
@@ -1354,7 +1544,7 @@ internal sealed class ModManagerView : UserControl
         mod.Update?.CompatibilityStatus is "Broken" or "Obsolete";
 
     /// <summary>状态列文本。</summary>
-    private static string DescribeStatus(ModEntry mod)
+    private string DescribeStatus(ModEntry mod)
     {
         var notes = new List<string>();
 
@@ -1388,8 +1578,8 @@ internal sealed class ModManagerView : UserControl
 
         if (mod.IsDuplicateId)
             notes.Add("重复 MOD ID（另一个同名 mod 的副本也在，只会加载一个）");
-        if (mod.MissingDependencies is { Length: > 0 } missing)
-            notes.Add($"缺少依赖：{missing}");
+        if (mod.MissingDependencies is { Length: > 0 })
+            notes.Add(DescribeMissingDependencies(mod));
         if (mod.IsEntryDllMissing)
             notes.Add("入口 DLL 文件不存在（装漏了或重名打包了）");
 

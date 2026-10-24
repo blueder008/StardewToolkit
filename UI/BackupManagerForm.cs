@@ -207,6 +207,7 @@ internal sealed class BackupManagerForm : Form
             new ColumnHeader { Text = "大小", Width = 84, TextAlign = HorizontalAlignment.Right },
         ]);
         _snapshotList.SelectedIndexChanged += (_, _) => SyncItems();
+        StretchOnResize(_snapshotList);
 
         var leftCard = MakeListCard("快照", _snapshotList);
         leftCard.Margin = new Padding(0, 0, 6, 10);
@@ -229,6 +230,7 @@ internal sealed class BackupManagerForm : Form
         ]);
         _itemList.SelectedIndexChanged += (_, _) => SyncActionButtons();
         _itemList.DoubleClick += async (_, _) => await RestoreSelectedAsync();
+        StretchOnResize(_itemList);
 
         var rightCard = MakeListCard("内容清单", _itemList);
         rightCard.Margin = new Padding(6, 0, 0, 10);
@@ -271,6 +273,25 @@ internal sealed class BackupManagerForm : Form
         inner.Controls.Add(list, 0, 1);
         card.Controls.Add(inner);
         return card;
+    }
+
+    /// <summary>最后一列吃掉剩余宽度（贴右不留白档）。</summary>
+    private static void StretchOnResize(ThemedListView list)
+    {
+        void Stretch()
+        {
+            if (!list.IsHandleCreated || list.Columns.Count == 0)
+                return;
+            int others = 0;
+            for (int i = 0; i < list.Columns.Count - 1; i++)
+                others += list.Columns[i].Width;
+            int stretch = list.ClientSize.Width - others;
+            if (stretch >= 60)
+                list.Columns[^1].Width = stretch;
+        }
+        list.Resize += (_, _) => Stretch();
+        list.LastColumnStretchChanged += Stretch;
+        list.HandleCreated += (_, _) => Stretch();
     }
 
     private Control BuildButtons()

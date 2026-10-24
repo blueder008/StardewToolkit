@@ -167,8 +167,12 @@ Mod 管理器里点「冲突检测」扫「多个启用的 mod 改同一份资�
 - 仅支持 Steam 版（GOG/绿色版走「手动选择目录…」）
 - Steam 启动项不自动改写（因为要写 VDF、且要求 Steam 完全退出），界面提供复制按钮
 - SMAPI 只在运行时从 GitHub 下载，不随程序打包（SMAPI 为 LGPL-3.0，避免再分发问题，也保证永远最新）
+- **GitHub 全部下载源（直连 + 三个镜像）都失败时，自动切换 Nexus 官方页面兜底**（stardewvalley/mods/2400）：
+  配了 Nexus API key 且是 Premium 会员会直接从 Nexus 自动下载安装包（同样过官方 SHA-256 校验）；
+  免费/未配 key 则自动打开 Nexus 文件页，浏览器下载 zip 后选回来校验安装。GitHub 彻底连不上时
+  无官方哈希可对照，会提示确认后放行（SMAPI 4.5+ 安装器自带恶意文件检测）
 - 更新检查和 SMAPI 的版本映射依赖本地已装 SMAPI/游戏版本号，读不到时不给「建议版本」，只显示最新版本
-- mod 更新下载的 zip 没有官方哈希可校验（SMAPI 自身的安装包仍走官方 SHA-256）；来源限制为作者官方 release
+- mod 更新下载的 zip 没有官方哈希可校验（SMAPI 自身的安装包仍走官方 SHA-256）；来源限制为作者官方 release；GitHub 直连下载失败时自动换 gh-proxy / ghfast / ghproxy 镜像重试
 - 已禁用的 mod 被 zip 安装时，会以启用状态装到 Mods 根目录（原禁用副本进备份目录，日志有提示）
 - Nexus API key 以明文存在 `%APPDATA%\StardewToolkit\config.json` 里（和官方 Mod 管理工具同级的现实取舍；本机自用风险可控）——介意的话用完可以点「Nexus 密钥…」重新生成 key 或删除配置文件
 - 非 Premium 的 Nexus 账号 API 直下有限制（官方规则）——但走浏览器「Mod Manager Download」（nxm 链接自带临时授权）免费账号一样可以全自动下载安装

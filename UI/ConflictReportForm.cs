@@ -101,7 +101,7 @@ internal sealed class ConflictReportForm : Form
             Width = 300,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
-            BackColor = Color.Transparent,
+            BackColor = Theme.Bg,   // HeroPanel 底色随高度渐变，右端取深处近似值；实底避免 Pill 四角残影
             Padding = new Padding(0, 33, 20, 0),
         };
         right.Controls.Add(_countPill);
@@ -199,6 +199,7 @@ internal sealed class ConflictReportForm : Form
             new ColumnHeader { Text = "参与", Width = 64, TextAlign = HorizontalAlignment.Right },
         ]);
         _groupList.SelectedIndexChanged += (_, _) => SyncEntries();
+        StretchOnResize(_groupList);
         var leftCard = MakeListCard("冲突组", _groupList);
         leftCard.Margin = new Padding(0, 0, 6, 10);
         grid.Controls.Add(leftCard, 0, 0);
@@ -219,6 +220,7 @@ internal sealed class ConflictReportForm : Form
         ]);
         _entryList.SelectedIndexChanged += (_, _) => SyncActionButtons();
         _entryList.DoubleClick += (_, _) => OpenSelectedFolder();
+        StretchOnResize(_entryList);
         var rightCard = MakeListCard("参与者", _entryList);
         rightCard.Margin = new Padding(6, 0, 0, 10);
         grid.Controls.Add(rightCard, 1, 0);
@@ -260,6 +262,25 @@ internal sealed class ConflictReportForm : Form
         inner.Controls.Add(list, 0, 1);
         card.Controls.Add(inner);
         return card;
+    }
+
+    /// <summary>最后一列吃掉剩余宽度（贴右不留白档）。</summary>
+    private static void StretchOnResize(ThemedListView list)
+    {
+        void Stretch()
+        {
+            if (!list.IsHandleCreated || list.Columns.Count == 0)
+                return;
+            int others = 0;
+            for (int i = 0; i < list.Columns.Count - 1; i++)
+                others += list.Columns[i].Width;
+            int stretch = list.ClientSize.Width - others;
+            if (stretch >= 60)
+                list.Columns[^1].Width = stretch;
+        }
+        list.Resize += (_, _) => Stretch();
+        list.LastColumnStretchChanged += Stretch;
+        list.HandleCreated += (_, _) => Stretch();
     }
 
     private Control BuildAdvice()

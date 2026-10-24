@@ -107,12 +107,16 @@ internal sealed class LogViewerForm : Form
         };
         _list.Columns.AddRange(
         [
-            new ColumnHeader { Text = "时间", Width = 76 },
-            new ColumnHeader { Text = "级别", Width = 82 },
-            new ColumnHeader { Text = "来源", Width = 210 },
+            new ColumnHeader { Text = "时间", Width = 96 },
+            new ColumnHeader { Text = "级别", Width = 92 },
+            new ColumnHeader { Text = "来源", Width = 220 },
             new ColumnHeader { Text = "内容", Width = 700 },
         ]);
         _list.SelectedIndexChanged += (_, _) => ShowDetail();
+        // 内容列吃掉剩余宽度（贴右不留白档）
+        _list.Resize += (_, _) => StretchContentColumn();
+        _list.LastColumnStretchChanged += StretchContentColumn;
+        _list.HandleCreated += (_, _) => StretchContentColumn();
         listCard.Controls.Add(_list);
         root.Controls.Add(listCard, 0, 2);
 
@@ -172,7 +176,7 @@ internal sealed class LogViewerForm : Form
             Width = 300,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
-            BackColor = Color.Transparent,
+            BackColor = Theme.Bg,   // HeroPanel 底色随高度渐变，右端取深处近似值；实底避免 Pill 四角残影
             Padding = new Padding(0, 33, 20, 0),
         };
         right.Controls.Add(_errorPill);
@@ -180,6 +184,19 @@ internal sealed class LogViewerForm : Form
         hero.Controls.Add(right);
 
         return hero;
+    }
+
+    /// <summary>内容列（最后一列）吃掉列表剩余宽度，避免表头右端露白。</summary>
+    private void StretchContentColumn()
+    {
+        if (_list is null || _list.Columns.Count == 0 || !_list.IsHandleCreated)
+            return;
+        int others = 0;
+        for (int i = 0; i < _list.Columns.Count - 1; i++)
+            others += _list.Columns[i].Width;
+        int stretch = _list.ClientSize.Width - others;
+        if (stretch >= 120)
+            _list.Columns[^1].Width = stretch;
     }
 
     private Control BuildFileCard()
@@ -247,9 +264,9 @@ internal sealed class LogViewerForm : Form
 
         _searchField = new TextField("按内容搜索（来源、错误信息…）")
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             Height = 34,
-            Margin = new Padding(0, 5, 14, 5),
+            Margin = new Padding(0, 5, 14, 0),
         };
         _searchField.Box.TextChanged += (_, _) => { RebuildVisible(); };
         filterRow.Controls.Add(_searchField, 0, 0);
@@ -259,6 +276,8 @@ internal sealed class LogViewerForm : Form
             Dock = DockStyle.Fill,
             BackColor = Theme.Surface,
             WrapContents = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0),
             Padding = new Padding(0, 11, 0, 0),
         };
@@ -479,13 +498,13 @@ internal sealed class LogViewerForm : Form
 
             var parts = new List<string>();
             if (_meta.SmapiVersion is { } smapi)
-                parts.Add("SMAPI {smapi}");
+                parts.Add($"SMAPI {smapi}");
             if (_meta.GameVersion is { } game)
-                parts.Add("游戏 {game}");
+                parts.Add($"游戏 {game}");
             if (_meta.ModCount is { } mods)
-                parts.Add("{mods} 个 mod");
+                parts.Add($"{mods} 个 mod");
             if (_meta.LogStartedAt is { } started)
-                parts.Add("记录于 {started.Trim()}");
+                parts.Add($"记录于 {started.Trim()}");
 
             int errors = _allEntries.Count(e => e.IsError);
             int warns = _allEntries.Count(e => e.Level is "ALERT" or "WARN");

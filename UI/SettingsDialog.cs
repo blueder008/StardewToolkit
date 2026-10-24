@@ -25,7 +25,7 @@ internal sealed class SettingsDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(660, 330);
+        ClientSize = new Size(660, 380);   // 330 时底部按钮被裁掉一半，加高留出完整按钮行
         Padding = new Padding(24, 20, 24, 18);
 
         var root = new TableLayoutPanel

@@ -6,6 +6,7 @@ obj/
 
 # 发布产物
 publish/
+publish-selfcontained/
 *.pdb
 
 # 分析/预览截图（本地临时产物，不入库）

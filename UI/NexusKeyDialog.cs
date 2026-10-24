@@ -159,12 +159,20 @@ public sealed class NexusKeyDialog : Form
             BackColor = Theme.Surface,
             Margin = new Padding(0),
         };
-        link.LinkClicked += (_, _) =>
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "https://www.nexusmods.com/users/myaccount?tab=api+access",
-                UseShellExecute = true,
-            });
+        link.LinkClicked += async (_, _) =>
+        {
+            const string url = "https://www.nexusmods.com/users/myaccount?tab=api+access";
+            if (await ShellHelper.OpenUrlAsync(url))
+                return;
+
+            ShellHelper.TryCopyToClipboard(url);
+            Msg.Show(this,
+                "浏览器没能自动打开。\n\n" +
+                $"原因：{ShellHelper.LastError}\n\n" +
+                "链接已复制到剪贴板，直接粘贴到浏览器地址栏即可：\n" +
+                url,
+                "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
         inner.Controls.Add(link, 0, 2);
 
         keyField = new TextField("粘贴你的 personal API key…", password: true)

@@ -49,7 +49,77 @@ internal sealed class ThemedListView : ListView
     {
         base.OnHandleCreated(e);
         Theme.UseDarkScrollbars(Handle);
+        ApplyDarkListBackground();
         ApplyHeaderHeight();
+    }
+
+    /// <summary>
+    /// 显式设置 ListView 的背景色 / 文字背景色（LVM_SETBKCOLOR / LVM_SETTEXTBKCOLOR）。
+    /// 列没铺满可视宽度（窗口窄、出现横向滚动）时，最后一列右边露出的区域
+    /// 用的就是这两个颜色——WinForms 不把 BackColor 映射过去，默认是白的。
+    /// </summary>
+    private void ApplyDarkListBackground()
+    {
+        try
+        {
+            int bk = ColorRef(Theme.Surface);
+            SendMessage(Handle, LvmSetBkColor, IntPtr.Zero, (IntPtr)bk);
+            SendMessage(Handle, LvmSetTextBkColor, IntPtr.Zero, (IntPtr)ColorRef(Theme.Surface));
+        }
+        catch
+        {
+            // 失败只是可能露出默认色，不影响功能
+        }
+    }
+
+    /// <summary>WinForms 颜色 → COLORREF（0x00BBGGRR）。</summary>
+    private static int ColorRef(Color c) => c.R | (c.G << 8) | (c.B << 16);
+
+    protected override void OnClientSizeChanged(EventArgs e)
+    {
+        base.OnClientSizeChanged(e);
+        // 最后一列没铺满时右侧会露出系统默认的白底/灰底。
+        // 客户区变化（出现滚动条、DPI 调整）不触发 Resize，这里补上通知。
+        LastColumnStretchChanged?.Invoke();
+    }
+
+    /// <summary>宿主在 ClientSize 变化时收到的通知（用来重拉最后一列宽）。</summary>
+    public event Action? LastColumnStretchChanged;
+
+    /*********
+    ** 表头拖拽联动
+    *********/
+    private const int WmNotify = 0x004E;
+    private const int HdnEndTrackW = -327;      // HDN_FIRST - 27：用户拖分隔线结束
+    private const int HdnDividerDblClickW = -326; // HDN_FIRST - 26：双击分隔线（自动调宽）
+
+    /// <summary>防重入：宿主响应通知去改列宽时又会产生 HDN 通知，不能跟着再响应。</summary>
+    private bool _suppressHeaderNotify;
+
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+
+        // 用户拖表头分隔线结束（或双击分隔线自动调宽）后，
+        // 最后一列右侧可能多出一段没有列覆盖的空档（表头露白、正文露底）。
+        // 拖动过程中不抢（否则用户拖备注列时宽度被补位逻辑吃掉，永远拉不动），
+        // 松手那一刻再让宿主补位。
+        if (m.Msg == WmNotify && !_suppressHeaderNotify)
+        {
+            int code = Marshal.ReadInt32(m.LParam, 2 * IntPtr.Size);
+            if (code is HdnEndTrackW or HdnDividerDblClickW && LastColumnStretchChanged is not null)
+            {
+                _suppressHeaderNotify = true;
+                try
+                {
+                    LastColumnStretchChanged?.Invoke();
+                }
+                finally
+                {
+                    _suppressHeaderNotify = false;
+                }
+            }
+        }
     }
 
     private void ApplyHeaderHeight()
@@ -61,6 +131,9 @@ internal sealed class ThemedListView : ListView
             IntPtr header = SendMessage(Handle, LvmGetHeader, IntPtr.Zero, IntPtr.Zero);
             if (header == IntPtr.Zero)
                 return;
+
+            // 列头控件本身也要套暗色主题，否则列没铺满时右端露系统亮色底
+            try { SetWindowTheme(header, "DarkMode_Explorer", null); } catch { /* 老系统忽略 */ }
 
             // 注意：HDI_HEIGHT 与 HDI_WIDTH 同为 0x0001，在 HDM_SETITEMW 上下文里
             // cxy 会被解释成「列宽」，所以绝不能用它设置表头高度（那会把第 0 列压扁）。
@@ -218,13 +291,18 @@ internal sealed class ThemedListView : ListView
     }
 
     /*********
-    ** P/Invoke（表头加高）
+    ** P/Invoke（表头加高 / 暗色背景）
     *********/
     private const int LvmGetHeader = 0x101F;
+    private const int LvmSetBkColor = 0x1025;
+    private const int LvmSetTextBkColor = 0x1026;
     private const int WmSetFont = 0x0030;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hwnd, string? subAppName, string? subIdList);
 }
 
 /*********
